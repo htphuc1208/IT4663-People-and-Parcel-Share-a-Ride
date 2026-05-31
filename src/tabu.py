@@ -1,48 +1,13 @@
 """
-tabu.py — Tabu Search for the Share-a-Ride Problem (Min-Max)
-=============================================================
+Tabu Search for the People and Parcel Share-a-Ride problem.
 
-This module implements a Tabu Search (TS) meta-heuristic that operates
-EXCLUSIVELY on the unified 1D chromosome representation (`Solution1D`).
+The search starts from the common initial solution and improves one current
+solution at a time. Neighbours are request-aware: a passenger is represented by
+its pickup node, while a parcel is handled as a pickup/drop-off pair so parcel
+precedence is not broken by the local moves.
 
-═══════════════════════════════════════════════════════════════════════════
-CRITICAL: 1D ENCODING MANIPULATION RULES
-═══════════════════════════════════════════════════════════════════════════
-All neighbourhood moves MUST obey these rules:
-
-  1. NEVER duplicate or remove `0` separators.
-     • The chromosome always contains exactly (K − 1) zeros.
-     • Zeros are immovable partition walls.  A move that swaps a zero with
-       a non-zero entry would merge or split vehicle routes, which changes
-       the problem structure.  This is FORBIDDEN.
-
-  2. Moves operate ONLY on non-zero genes.
-     • Swap: exchange two non-zero genes at different positions.
-     • Relocate: remove a non-zero gene and re-insert it at another
-       non-zero-adjacent position.
-     • 2-opt (intra-route): reverse a sub-sequence WITHIN one route
-       segment (between two consecutive zeros / chromosome boundaries).
-     All these moves preserve zero positions and the set of non-zero IDs.
-
-  3. Tabu attribute:
-     • A move is recorded as the tuple (node_id, from_position, to_position).
-     • If a move's inverse is in the tabu list, the move is forbidden UNLESS
-       it satisfies the aspiration criterion (produces a new global best).
-
-  4. ADAPTIVE TABU TENURE:
-     • The tabu tenure (the number of iterations a move stays forbidden)
-       starts at an initial value and is adjusted dynamically:
-       — If the best solution improves, the tenure is DECREASED (allowing
-         more moves) to exploit the promising region.
-       — If the search stagnates for `stagnation_limit` iterations, the
-         tenure is INCREASED (blocking more moves) to diversify the search.
-     • Tenure is clamped between `tenure_min` and `tenure_max`.
-     • This self-regulating mechanism balances intensification and
-       diversification without manual parameter tuning.
-
-  5. Every neighbour solution is a valid `Solution1D` — same length,
-     same separator count, same set of non-zero node IDs.
-═══════════════════════════════════════════════════════════════════════════
+Objective: minimize the maximum route cost among all taxis. The cost and all
+constraint penalties are computed by fitness.evaluate().
 """
 
 from __future__ import annotations
@@ -50,185 +15,287 @@ from __future__ import annotations
 import logging
 import random
 import time
-from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .encoding_and_read import ProblemData, Solution1D
 from .fitness import evaluate
-from .init import greedy_init
+
+try:
+    from .init import init_solution as build_initial_solution
+except ImportError:
+    from .init import greedy_init as build_initial_solution
+
 
 logger = logging.getLogger(__name__)
 
+Edge = Tuple[int, int]
+MoveInfo = Tuple[Solution1D, Set[Edge], Set[Edge], str]
+MoveGenerator = Callable[[Solution1D], Optional[MoveInfo]]
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                        TABU SEARCH PARAMETERS                           ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 @dataclass
 class TabuConfig:
-    """Configuration for Tabu Search."""
-    max_iterations: int = 1000
-    neighbourhood_sample_size: int = 30  # N(s) candidates per iteration
+    """Configuration for Adaptive Tabu Search."""
 
-    # ── Adaptive tabu tenure ─────────────────────────────────────────────
+    max_iterations: int = 1000
+    neighbourhood_sample_size: int = 50
+
     tenure_init: int = 10
-    tenure_min: int = 5
-    tenure_max: int = 40
-    tenure_increase: int = 2       # bump when stagnating
-    tenure_decrease: int = 1       # reduce when improving
-    stagnation_limit: int = 20     # iterations without improvement
+    tenure_min: int = 4
+    tenure_max: int = 50
+    tenure_increase: int = 3
+    tenure_decrease: int = 1
+    stagnation_limit: int = 25
 
     seed: int | None = None
     time_limit_seconds: float = float("inf")
 
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                           TABU LIST                                      ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-
 class TabuList:
     """
-    Fixed-capacity tabu list storing move attributes as (node, from, to).
+    Short-term memory over route segments.
 
-    The capacity (tenure) is mutable — the adaptive mechanism adjusts it
-    at runtime.
+    A route segment is represented by an edge (u, v) in a raw route wrapped by
+    depot nodes. After a move, removed edges are made tabu. A future neighbour
+    that tries to add any of those edges is forbidden unless aspiration accepts
+    it because it improves the global best solution.
     """
 
     def __init__(self, tenure: int) -> None:
-        self._tenure: int = tenure
-        self._moves: Deque[Tuple[int, int, int]] = deque(maxlen=tenure)
+        self.tenure = tenure
+        self._expires_at: Dict[Edge, int] = {}
 
-    @property
-    def tenure(self) -> int:
-        return self._tenure
+    def add(self, edges: Iterable[Edge], iteration: int) -> None:
+        expiry = iteration + self.tenure
+        for edge in edges:
+            self._expires_at[edge] = expiry
+            self._expires_at[(edge[1], edge[0])] = expiry
 
-    @tenure.setter
-    def tenure(self, value: int) -> None:
-        self._tenure = value
-        # Rebuild deque with new maxlen (Python deques don't allow resize)
-        old_items: List[Tuple[int, int, int]] = list(self._moves)
-        self._moves = deque(old_items[-value:], maxlen=value)
+    def is_tabu(self, added_edges: Iterable[Edge], iteration: int) -> bool:
+        self.purge(iteration)
+        return any(self._expires_at.get(edge, -1) > iteration for edge in added_edges)
 
-    def add(self, move: Tuple[int, int, int]) -> None:
-        """Record a move as tabu."""
-        self._moves.append(move)
-
-    def is_tabu(self, move: Tuple[int, int, int]) -> bool:
-        """Check whether a move or its inverse is tabu."""
-        node, frm, to = move
-        inverse: Tuple[int, int, int] = (node, to, frm)
-        return move in self._moves or inverse in self._moves
+    def purge(self, iteration: int) -> None:
+        expired = [edge for edge, expiry in self._expires_at.items() if expiry <= iteration]
+        for edge in expired:
+            del self._expires_at[edge]
 
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                     NEIGHBOURHOOD GENERATORS                             ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
+def _flatten_routes(routes: List[List[int]]) -> List[int]:
+    chromosome: List[int] = []
+    for idx, route in enumerate(routes):
+        chromosome.extend(route)
+        if idx < len(routes) - 1:
+            chromosome.append(0)
+    return chromosome
 
-def _non_zero_positions(chromosome: List[int]) -> List[int]:
-    """Return indices of all non-zero genes."""
-    return [i for i, g in enumerate(chromosome) if g != 0]
+
+def _route_edges(route: List[int]) -> Set[Edge]:
+    wrapped = [0] + route + [0]
+    return {(wrapped[i], wrapped[i + 1]) for i in range(len(wrapped) - 1)}
 
 
-def generate_swap_neighbour(
+def _all_edges(routes: List[List[int]]) -> Set[Edge]:
+    edges: Set[Edge] = set()
+    for route in routes:
+        edges.update(_route_edges(route))
+    return edges
+
+
+def _make_move(
     solution: Solution1D,
-) -> Tuple[Solution1D, Tuple[int, int, int]]:
+    routes: List[List[int]],
+    before_edges: Set[Edge],
+    name: str,
+) -> MoveInfo:
+    neighbour = Solution1D(_flatten_routes(routes), solution.problem)
+    after_edges = _all_edges(routes)
+    removed_edges = before_edges - after_edges
+    added_edges = after_edges - before_edges
+    return neighbour, added_edges, removed_edges, name
+
+
+def _parcel_nodes(problem: ProblemData, parcel_index: int) -> Tuple[int, int]:
+    pickup = problem.N + parcel_index
+    dropoff = 2 * problem.N + problem.M + parcel_index
+    return pickup, dropoff
+
+
+def _find_parcel(
+    routes: List[List[int]],
+    problem: ProblemData,
+    parcel_index: int,
+) -> Optional[Tuple[int, int, int]]:
+    pickup, dropoff = _parcel_nodes(problem, parcel_index)
+    for route_idx, route in enumerate(routes):
+        if pickup in route and dropoff in route:
+            pickup_pos = route.index(pickup)
+            dropoff_pos = route.index(dropoff)
+            if pickup_pos < dropoff_pos:
+                return route_idx, pickup_pos, dropoff_pos
+    return None
+
+
+def _passenger_locations(routes: List[List[int]], problem: ProblemData) -> List[Tuple[int, int]]:
+    locations: List[Tuple[int, int]] = []
+    for route_idx, route in enumerate(routes):
+        for pos, node in enumerate(route):
+            if 1 <= node <= problem.N:
+                locations.append((route_idx, pos))
+    return locations
+
+
+def generate_parcel_transfer(solution: Solution1D) -> Optional[MoveInfo]:
     """
-    Generate a neighbour by swapping two random non-zero genes.
+    Move one complete parcel pickup/drop-off pair to another taxi.
 
-    Returns (neighbour, move_attribute) where move_attribute = (node, pos_from, pos_to).
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero positions are selected.
-    • Zeros are never touched.
-    • The set of non-zero IDs is preserved (swap is bijective).
+    Why this operator: the objective is min-max, so moving parcel work away from
+    a long route is the most direct way to rebalance the bottleneck taxi. The
+    pickup and drop-off are moved together and reinserted in precedence order.
     """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
 
-    i, j = random.sample(positions, 2)
-    node_id: int = chrom[i]
-    chrom[i], chrom[j] = chrom[j], chrom[i]
+    problem = solution.problem
+    if problem.M == 0 or problem.K < 2:
+        return None
 
-    move: Tuple[int, int, int] = (node_id, i, j)
-    return Solution1D(chrom, solution.problem), move
+    routes = [list(route) for route in solution.get_routes()]
+    before_edges = _all_edges(routes)
+
+    parcel_ids = list(range(1, problem.M + 1))
+    random.shuffle(parcel_ids)
+
+    selected: Optional[Tuple[int, int, int, int]] = None
+    for parcel_idx in parcel_ids:
+        found = _find_parcel(routes, problem, parcel_idx)
+        if found is not None:
+            selected = (parcel_idx, found[0], found[1], found[2])
+            break
+
+    if selected is None:
+        return None
+
+    parcel_idx, src_route, pickup_pos, dropoff_pos = selected
+    pickup, dropoff = _parcel_nodes(problem, parcel_idx)
+    target_routes = [idx for idx in range(problem.K) if idx != src_route]
+    if not target_routes:
+        return None
+
+    dst_route = random.choice(target_routes)
+    for pos in sorted((pickup_pos, dropoff_pos), reverse=True):
+        routes[src_route].pop(pos)
+
+    insert_pickup = random.randint(0, len(routes[dst_route]))
+    routes[dst_route].insert(insert_pickup, pickup)
+    insert_dropoff = random.randint(insert_pickup + 1, len(routes[dst_route]))
+    routes[dst_route].insert(insert_dropoff, dropoff)
+
+    return _make_move(solution, routes, before_edges, "parcel_transfer")
 
 
-def generate_relocate_neighbour(
-    solution: Solution1D,
-) -> Tuple[Solution1D, Tuple[int, int, int]]:
+def generate_parcel_swap(solution: Solution1D) -> Optional[MoveInfo]:
     """
-    Generate a neighbour by relocating a random non-zero gene to another
-    non-zero-adjacent position.
+    Swap the positions of two parcel requests.
 
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero genes are moved.
-    • The gene is removed and reinserted; no zeros are affected.
-    • The set of non-zero IDs remains unchanged (same ID, new position).
+    Why this operator: it changes parcel sequencing while keeping the number
+    of parcel jobs on each selected taxi stable. This is useful when the route
+    is feasible but the local order creates long detours.
     """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
 
-    if len(positions) < 2:
-        move: Tuple[int, int, int] = (0, 0, 0)
-        return solution.copy(), move
+    problem = solution.problem
+    if problem.M < 2:
+        return None
 
-    src_pos: int = random.choice(positions)
-    node_id: int = chrom.pop(src_pos)
+    routes = [list(route) for route in solution.get_routes()]
+    before_edges = _all_edges(routes)
+    parcel_ids = list(range(1, problem.M + 1))
+    random.shuffle(parcel_ids)
 
-    # Re-identify valid insertion points (between non-zeros / at segment edges)
-    new_positions: List[int] = _non_zero_positions(chrom)
-    if new_positions:
-        dst_pos: int = random.choice(new_positions)
-    else:
-        dst_pos = 0
+    found: List[Tuple[int, int, int, int]] = []
+    for parcel_idx in parcel_ids:
+        loc = _find_parcel(routes, problem, parcel_idx)
+        if loc is not None:
+            found.append((parcel_idx, loc[0], loc[1], loc[2]))
+            if len(found) == 2:
+                break
 
-    chrom.insert(dst_pos, node_id)
-    move = (node_id, src_pos, dst_pos)
-    return Solution1D(chrom, solution.problem), move
+    if len(found) < 2:
+        return None
+
+    first, second = found
+    p1, r1, p1_pos, d1_pos = first
+    p2, r2, p2_pos, d2_pos = second
+    p1_pick, p1_drop = _parcel_nodes(problem, p1)
+    p2_pick, p2_drop = _parcel_nodes(problem, p2)
+
+    routes[r1][p1_pos], routes[r1][d1_pos] = p2_pick, p2_drop
+    routes[r2][p2_pos], routes[r2][d2_pos] = p1_pick, p1_drop
+
+    return _make_move(solution, routes, before_edges, "parcel_swap")
 
 
-def generate_intra_route_2opt(
-    solution: Solution1D,
-) -> Tuple[Solution1D, Tuple[int, int, int]]:
+def generate_passenger_relocate(solution: Solution1D) -> Optional[MoveInfo]:
     """
-    Reverse a sub-segment within a single route (intra-route 2-opt).
+    Move one passenger pickup node to another route position.
 
-    ── 1D ENCODING SAFETY ──
-    • Selects a random route segment (between two zeros / boundaries).
-    • Reverses the non-zero portion within that segment.
-    • Zeros are untouched.
-    • No node IDs are added or removed.
+    Why this operator: passengers are direct trips in the decoder, so relocating
+    the pickup is enough to transfer the whole direct passenger ride. It gives
+    the search a small, precise load-balancing move beside the parcel moves.
     """
-    chrom: List[int] = list(solution.chromosome)
-    routes: List[List[int]] = solution.get_routes()
 
-    non_empty: List[int] = [k for k, r in enumerate(routes) if len(r) >= 2]
-    if not non_empty:
-        return solution.copy(), (0, 0, 0)
+    problem = solution.problem
+    routes = [list(route) for route in solution.get_routes()]
+    locations = _passenger_locations(routes, problem)
+    if len(locations) < 1:
+        return None
 
-    route_idx: int = random.choice(non_empty)
-    route: List[int] = routes[route_idx]
+    before_edges = _all_edges(routes)
+    src_route, src_pos = random.choice(locations)
+    node = routes[src_route].pop(src_pos)
 
-    i, j = sorted(random.sample(range(len(route)), 2))
-    # For move attribute, record first node and positions
-    node_id: int = route[i]
-    route[i:j + 1] = reversed(route[i:j + 1])
+    dst_route = random.randrange(problem.K)
+    insert_pos = random.randint(0, len(routes[dst_route]))
+    routes[dst_route].insert(insert_pos, node)
 
-    # Write back into chromosome
-    pos: int = 0
-    for k in range(route_idx):
-        pos += len(routes[k]) + 1  # +1 for separator
-    for offset, node in enumerate(route):
-        chrom[pos + offset] = node
-
-    move: Tuple[int, int, int] = (node_id, pos + i, pos + j)
-    return Solution1D(chrom, solution.problem), move
+    return _make_move(solution, routes, before_edges, "passenger_relocate")
 
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                      TABU SEARCH MAIN LOOP                              ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
+def generate_intra_route_reorder(solution: Solution1D) -> Optional[MoveInfo]:
+    """
+    Reverse a short block inside one taxi route.
+
+    Why this operator: after assignments are roughly balanced, most remaining
+    improvement comes from route order. Reversing a local block is a 2-opt-like
+    exploitation move. Reversals that break parcel precedence are skipped.
+    """
+
+    problem = solution.problem
+    routes = [list(route) for route in solution.get_routes()]
+    candidates = [idx for idx, route in enumerate(routes) if len(route) >= 3]
+    if not candidates:
+        return None
+
+    before_edges = _all_edges(routes)
+    route_idx = random.choice(candidates)
+    route = routes[route_idx]
+    left, right = sorted(random.sample(range(len(route)), 2))
+    if left == right:
+        return None
+
+    route[left : right + 1] = reversed(route[left : right + 1])
+
+    for parcel_idx in range(1, problem.M + 1):
+        found = _find_parcel(routes, problem, parcel_idx)
+        if found is None:
+            return None
+
+    return _make_move(solution, routes, before_edges, "intra_route_reorder")
+
+
+def _is_structurally_valid(solution: Solution1D) -> bool:
+    valid, _ = solution.validate()
+    return valid
+
 
 def run_tabu(
     problem: ProblemData,
@@ -236,121 +303,103 @@ def run_tabu(
     initial_solution: Solution1D | None = None,
 ) -> Tuple[Solution1D, float, List[float]]:
     """
-    Execute the Tabu Search algorithm.
+    Execute Adaptive Tabu Search.
 
-    Parameters
-    ----------
-    problem : ProblemData
-        Parsed SARP instance.
-    config : TabuConfig | None
-        Hyper-parameters (uses defaults if None).
-    initial_solution : Solution1D | None
-        Starting point (greedy_init is used if None).
-
-    Returns
-    -------
-    (best_solution, best_fitness, history)
-        best_solution — the best Solution1D found.
-        best_fitness  — its Min-Max objective value.
-        history       — best fitness per iteration for plotting.
+    Returns (best_solution, best_fitness, history). Lower fitness is better.
+    The aspiration criterion allows a tabu move when it creates a new global
+    best solution.
     """
+
     if config is None:
         config = TabuConfig()
     if config.seed is not None:
         random.seed(config.seed)
 
-    start_time: float = time.time()
+    start_time = time.time()
+    current = initial_solution.copy() if initial_solution is not None else build_initial_solution(problem)
+    current_fitness = evaluate(current)
 
-    # ── Initial solution ─────────────────────────────────────────────────
-    if initial_solution is None:
-        current: Solution1D = greedy_init(problem)
-    else:
-        current = initial_solution.copy()
-
-    current_fitness: float = evaluate(current)
-    best_solution: Solution1D = current.copy()
-    best_fitness: float = current_fitness
+    best_solution = current.copy()
+    best_fitness = current_fitness
     history: List[float] = [best_fitness]
 
-    # ── Tabu list & adaptive tenure ──────────────────────────────────────
-    tabu = TabuList(tenure=config.tenure_init)
-    stagnation_counter: int = 0
-
-    # Neighbourhood generators (sampled stochastically each iteration)
-    move_generators = [
-        generate_swap_neighbour,
-        generate_relocate_neighbour,
-        generate_intra_route_2opt,
+    tabu = TabuList(config.tenure_init)
+    stagnation_counter = 0
+    generators: List[MoveGenerator] = [
+        generate_parcel_transfer,
+        generate_parcel_swap,
+        generate_passenger_relocate,
+        generate_intra_route_reorder,
     ]
 
     logger.info(
-        "Tabu Search started | max_iter=%d | tenure_init=%d",
-        config.max_iterations, config.tenure_init,
+        "Tabu Search started | max_iter=%d | sample=%d | tenure=%d",
+        config.max_iterations,
+        config.neighbourhood_sample_size,
+        tabu.tenure,
     )
 
-    # ── Main loop ────────────────────────────────────────────────────────
     for iteration in range(1, config.max_iterations + 1):
-        elapsed: float = time.time() - start_time
-        if elapsed >= config.time_limit_seconds:
+        if time.time() - start_time >= config.time_limit_seconds:
             logger.info("Tabu time limit reached at iteration %d", iteration)
             break
 
-        # ── Generate neighbourhood ───────────────────────────────────────
-        candidates: List[Tuple[Solution1D, float, Tuple[int, int, int]]] = []
+        candidates: List[Tuple[Solution1D, float, Set[Edge], Set[Edge], str]] = []
+        attempts = max(config.neighbourhood_sample_size * 3, 10)
+        while len(candidates) < config.neighbourhood_sample_size and attempts > 0:
+            attempts -= 1
+            move = random.choice(generators)(current)
+            if move is None:
+                continue
+            neighbour, added_edges, removed_edges, name = move
+            if not _is_structurally_valid(neighbour):
+                continue
+            candidates.append((neighbour, evaluate(neighbour), added_edges, removed_edges, name))
 
-        for _ in range(config.neighbourhood_sample_size):
-            gen = random.choice(move_generators)
-            neighbour, move = gen(current)
-            fit: float = evaluate(neighbour)
-            candidates.append((neighbour, fit, move))
+        if not candidates:
+            logger.warning("No valid Tabu neighbours generated at iteration %d", iteration)
+            break
 
-        # ── Select best admissible move ──────────────────────────────────
-        candidates.sort(key=lambda c: c[1])
+        candidates.sort(key=lambda item: item[1])
+        chosen: Optional[Tuple[Solution1D, float, Set[Edge], Set[Edge], str]] = None
 
-        chosen: Optional[Tuple[Solution1D, float, Tuple[int, int, int]]] = None
-        for neighbour, fit, move in candidates:
-            if not tabu.is_tabu(move):
-                chosen = (neighbour, fit, move)
-                break
-            # Aspiration criterion: accept if it's a new global best
-            elif fit < best_fitness:
-                chosen = (neighbour, fit, move)
+        for candidate in candidates:
+            neighbour, fit, added_edges, _removed_edges, _name = candidate
+            is_tabu = tabu.is_tabu(added_edges, iteration)
+            aspiration = fit < best_fitness
+            if not is_tabu or aspiration:
+                chosen = candidate
                 break
 
         if chosen is None:
-            # All moves are tabu and none satisfy aspiration — take the best
             chosen = candidates[0]
 
-        current, current_fitness, move = chosen
-        tabu.add(move)
+        current, current_fitness, added_edges, removed_edges, move_name = chosen
+        tabu.add(removed_edges, iteration)
 
-        # ── Update global best ───────────────────────────────────────────
         if current_fitness < best_fitness:
             best_fitness = current_fitness
             best_solution = current.copy()
             stagnation_counter = 0
-
-            # ADAPTIVE: decrease tenure → intensify around improving region
-            tabu.tenure = max(tabu.tenure - config.tenure_decrease, config.tenure_min)
+            tabu.tenure = max(config.tenure_min, tabu.tenure - config.tenure_decrease)
         else:
             stagnation_counter += 1
 
+        if stagnation_counter >= config.stagnation_limit:
+            tabu.tenure = min(config.tenure_max, tabu.tenure + config.tenure_increase)
+            stagnation_counter = 0
+            logger.debug("Iter %d: stagnation, increase tenure to %d", iteration, tabu.tenure)
+
         history.append(best_fitness)
 
-        # ── Adaptive tenure adjustment ───────────────────────────────────
-        # If stagnation persists → INCREASE tenure to diversify
-        if stagnation_counter >= config.stagnation_limit:
-            tabu.tenure = min(tabu.tenure + config.tenure_increase, config.tenure_max)
-            stagnation_counter = 0
-            logger.debug(
-                "Iter %d: stagnation → tenure ↑ %d", iteration, tabu.tenure,
-            )
-
-        if iteration % 100 == 0 or iteration == 1:
+        if iteration == 1 or iteration % 100 == 0:
             logger.info(
-                "Iter %4d | best=%.4f | current=%.4f | tenure=%d | stag=%d",
-                iteration, best_fitness, current_fitness,
-                tabu.tenure, stagnation_counter,
+                "Iter %4d | best=%.4f | current=%.4f | tenure=%d | move=%s",
+                iteration,
+                best_fitness,
+                current_fitness,
+                tabu.tenure,
+                move_name,
             )
 
     logger.info("Tabu Search finished | best_fitness=%.4f", best_fitness)
