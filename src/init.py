@@ -117,7 +117,7 @@ def greedy_init(problem: ProblemData, seed: int | None = None) -> Solution1D:
         best_dist: float = float("inf")
 
         for v in range(K):
-            if vehicle_load[v] + parcel.demand <= problem.vehicle_capacity:
+            if vehicle_load[v] + parcel.demand <= problem.capacity_for_vehicle(v):
                 if vehicle_dist[v] < best_dist:
                     best_dist = vehicle_dist[v]
                     best_vehicle = v

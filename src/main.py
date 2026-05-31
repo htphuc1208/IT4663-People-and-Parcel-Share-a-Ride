@@ -312,8 +312,8 @@ def main() -> None:
             continue
 
         logger.info(
-            "Parsed: N=%d passengers, M=%d parcels, K=%d vehicles, Q=%d capacity",
-            problem.N, problem.M, problem.K, problem.vehicle_capacity,
+            "Parsed: N=%d passengers, M=%d parcels, K=%d vehicles, Q=%s",
+            problem.N, problem.M, problem.K, problem.vehicle_capacities,
         )
         logger.info("Chromosome length = %d", problem.chromosome_length)
 

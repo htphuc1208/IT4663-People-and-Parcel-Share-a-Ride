@@ -1,0 +1,291 @@
+{
+  "K": 6,
+  "M": 24,
+  "N": 48,
+  "capacity_mode": "heterogeneous",
+  "notes": [
+    "generated heterogeneous taxi capacities in [3, 6]"
+  ],
+  "parcels": {
+    "1": {
+      "old_request": 2,
+      "quantity": 2
+    },
+    "2": {
+      "old_request": 3,
+      "quantity": 5
+    },
+    "3": {
+      "old_request": 4,
+      "quantity": 3
+    },
+    "4": {
+      "old_request": 6,
+      "quantity": 5
+    },
+    "5": {
+      "old_request": 12,
+      "quantity": 1
+    },
+    "6": {
+      "old_request": 13,
+      "quantity": 2
+    },
+    "7": {
+      "old_request": 14,
+      "quantity": 6
+    },
+    "8": {
+      "old_request": 15,
+      "quantity": 1
+    },
+    "9": {
+      "old_request": 18,
+      "quantity": 2
+    },
+    "10": {
+      "old_request": 27,
+      "quantity": 1
+    },
+    "11": {
+      "old_request": 29,
+      "quantity": 2
+    },
+    "12": {
+      "old_request": 32,
+      "quantity": 5
+    },
+    "13": {
+      "old_request": 33,
+      "quantity": 2
+    },
+    "14": {
+      "old_request": 35,
+      "quantity": 4
+    },
+    "15": {
+      "old_request": 36,
+      "quantity": 3
+    },
+    "16": {
+      "old_request": 39,
+      "quantity": 2
+    },
+    "17": {
+      "old_request": 42,
+      "quantity": 2
+    },
+    "18": {
+      "old_request": 45,
+      "quantity": 1
+    },
+    "19": {
+      "old_request": 46,
+      "quantity": 1
+    },
+    "20": {
+      "old_request": 55,
+      "quantity": 6
+    },
+    "21": {
+      "old_request": 62,
+      "quantity": 3
+    },
+    "22": {
+      "old_request": 66,
+      "quantity": 6
+    },
+    "23": {
+      "old_request": 70,
+      "quantity": 6
+    },
+    "24": {
+      "old_request": 72,
+      "quantity": 6
+    }
+  },
+  "passengers": {
+    "1": {
+      "old_request": 1
+    },
+    "2": {
+      "old_request": 5
+    },
+    "3": {
+      "old_request": 7
+    },
+    "4": {
+      "old_request": 8
+    },
+    "5": {
+      "old_request": 9
+    },
+    "6": {
+      "old_request": 10
+    },
+    "7": {
+      "old_request": 11
+    },
+    "8": {
+      "old_request": 16
+    },
+    "9": {
+      "old_request": 17
+    },
+    "10": {
+      "old_request": 19
+    },
+    "11": {
+      "old_request": 20
+    },
+    "12": {
+      "old_request": 21
+    },
+    "13": {
+      "old_request": 22
+    },
+    "14": {
+      "old_request": 23
+    },
+    "15": {
+      "old_request": 24
+    },
+    "16": {
+      "old_request": 25
+    },
+    "17": {
+      "old_request": 26
+    },
+    "18": {
+      "old_request": 28
+    },
+    "19": {
+      "old_request": 30
+    },
+    "20": {
+      "old_request": 31
+    },
+    "21": {
+      "old_request": 34
+    },
+    "22": {
+      "old_request": 37
+    },
+    "23": {
+      "old_request": 38
+    },
+    "24": {
+      "old_request": 40
+    },
+    "25": {
+      "old_request": 41
+    },
+    "26": {
+      "old_request": 43
+    },
+    "27": {
+      "old_request": 44
+    },
+    "28": {
+      "old_request": 47
+    },
+    "29": {
+      "old_request": 48
+    },
+    "30": {
+      "old_request": 49
+    },
+    "31": {
+      "old_request": 50
+    },
+    "32": {
+      "old_request": 51
+    },
+    "33": {
+      "old_request": 52
+    },
+    "34": {
+      "old_request": 53
+    },
+    "35": {
+      "old_request": 54
+    },
+    "36": {
+      "old_request": 56
+    },
+    "37": {
+      "old_request": 57
+    },
+    "38": {
+      "old_request": 58
+    },
+    "39": {
+      "old_request": 59
+    },
+    "40": {
+      "old_request": 60
+    },
+    "41": {
+      "old_request": 61
+    },
+    "42": {
+      "old_request": 63
+    },
+    "43": {
+      "old_request": 64
+    },
+    "44": {
+      "old_request": 65
+    },
+    "45": {
+      "old_request": 67
+    },
+    "46": {
+      "old_request": 68
+    },
+    "47": {
+      "old_request": 69
+    },
+    "48": {
+      "old_request": 71
+    }
+  },
+  "raw_capacity": 6,
+  "raw_file": "data/raw_darp/ropke_cordeau_2007/part_b/b6-72.txt",
+  "raw_request_count": 72,
+  "seed": 42,
+  "selected_parcels_original": [
+    2,
+    3,
+    4,
+    6,
+    12,
+    13,
+    14,
+    15,
+    18,
+    27,
+    29,
+    32,
+    33,
+    35,
+    36,
+    39,
+    42,
+    45,
+    46,
+    55,
+    62,
+    66,
+    70,
+    72
+  ],
+  "taxi_capacities": [
+    6,
+    5,
+    3,
+    4,
+    5,
+    4
+  ]
+}

@@ -1,0 +1,321 @@
+{
+  "K": 8,
+  "M": 26,
+  "N": 54,
+  "capacity_mode": "heterogeneous",
+  "notes": [
+    "generated heterogeneous taxi capacities in [3, 6]"
+  ],
+  "parcels": {
+    "1": {
+      "old_request": 4,
+      "quantity": 4
+    },
+    "2": {
+      "old_request": 5,
+      "quantity": 4
+    },
+    "3": {
+      "old_request": 12,
+      "quantity": 1
+    },
+    "4": {
+      "old_request": 13,
+      "quantity": 4
+    },
+    "5": {
+      "old_request": 14,
+      "quantity": 3
+    },
+    "6": {
+      "old_request": 15,
+      "quantity": 5
+    },
+    "7": {
+      "old_request": 18,
+      "quantity": 1
+    },
+    "8": {
+      "old_request": 27,
+      "quantity": 2
+    },
+    "9": {
+      "old_request": 28,
+      "quantity": 2
+    },
+    "10": {
+      "old_request": 29,
+      "quantity": 5
+    },
+    "11": {
+      "old_request": 30,
+      "quantity": 2
+    },
+    "12": {
+      "old_request": 32,
+      "quantity": 4
+    },
+    "13": {
+      "old_request": 35,
+      "quantity": 5
+    },
+    "14": {
+      "old_request": 36,
+      "quantity": 3
+    },
+    "15": {
+      "old_request": 42,
+      "quantity": 6
+    },
+    "16": {
+      "old_request": 45,
+      "quantity": 1
+    },
+    "17": {
+      "old_request": 46,
+      "quantity": 6
+    },
+    "18": {
+      "old_request": 55,
+      "quantity": 4
+    },
+    "19": {
+      "old_request": 65,
+      "quantity": 2
+    },
+    "20": {
+      "old_request": 69,
+      "quantity": 3
+    },
+    "21": {
+      "old_request": 70,
+      "quantity": 1
+    },
+    "22": {
+      "old_request": 72,
+      "quantity": 2
+    },
+    "23": {
+      "old_request": 76,
+      "quantity": 6
+    },
+    "24": {
+      "old_request": 78,
+      "quantity": 3
+    },
+    "25": {
+      "old_request": 79,
+      "quantity": 3
+    },
+    "26": {
+      "old_request": 80,
+      "quantity": 6
+    }
+  },
+  "passengers": {
+    "1": {
+      "old_request": 1
+    },
+    "2": {
+      "old_request": 2
+    },
+    "3": {
+      "old_request": 3
+    },
+    "4": {
+      "old_request": 6
+    },
+    "5": {
+      "old_request": 7
+    },
+    "6": {
+      "old_request": 8
+    },
+    "7": {
+      "old_request": 9
+    },
+    "8": {
+      "old_request": 10
+    },
+    "9": {
+      "old_request": 11
+    },
+    "10": {
+      "old_request": 16
+    },
+    "11": {
+      "old_request": 17
+    },
+    "12": {
+      "old_request": 19
+    },
+    "13": {
+      "old_request": 20
+    },
+    "14": {
+      "old_request": 21
+    },
+    "15": {
+      "old_request": 22
+    },
+    "16": {
+      "old_request": 23
+    },
+    "17": {
+      "old_request": 24
+    },
+    "18": {
+      "old_request": 25
+    },
+    "19": {
+      "old_request": 26
+    },
+    "20": {
+      "old_request": 31
+    },
+    "21": {
+      "old_request": 33
+    },
+    "22": {
+      "old_request": 34
+    },
+    "23": {
+      "old_request": 37
+    },
+    "24": {
+      "old_request": 38
+    },
+    "25": {
+      "old_request": 39
+    },
+    "26": {
+      "old_request": 40
+    },
+    "27": {
+      "old_request": 41
+    },
+    "28": {
+      "old_request": 43
+    },
+    "29": {
+      "old_request": 44
+    },
+    "30": {
+      "old_request": 47
+    },
+    "31": {
+      "old_request": 48
+    },
+    "32": {
+      "old_request": 49
+    },
+    "33": {
+      "old_request": 50
+    },
+    "34": {
+      "old_request": 51
+    },
+    "35": {
+      "old_request": 52
+    },
+    "36": {
+      "old_request": 53
+    },
+    "37": {
+      "old_request": 54
+    },
+    "38": {
+      "old_request": 56
+    },
+    "39": {
+      "old_request": 57
+    },
+    "40": {
+      "old_request": 58
+    },
+    "41": {
+      "old_request": 59
+    },
+    "42": {
+      "old_request": 60
+    },
+    "43": {
+      "old_request": 61
+    },
+    "44": {
+      "old_request": 62
+    },
+    "45": {
+      "old_request": 63
+    },
+    "46": {
+      "old_request": 64
+    },
+    "47": {
+      "old_request": 66
+    },
+    "48": {
+      "old_request": 67
+    },
+    "49": {
+      "old_request": 68
+    },
+    "50": {
+      "old_request": 71
+    },
+    "51": {
+      "old_request": 73
+    },
+    "52": {
+      "old_request": 74
+    },
+    "53": {
+      "old_request": 75
+    },
+    "54": {
+      "old_request": 77
+    }
+  },
+  "raw_capacity": 6,
+  "raw_file": "data/raw_darp/ropke_cordeau_2007/part_b/b8-80.txt",
+  "raw_request_count": 80,
+  "seed": 42,
+  "selected_parcels_original": [
+    4,
+    5,
+    12,
+    13,
+    14,
+    15,
+    18,
+    27,
+    28,
+    29,
+    30,
+    32,
+    35,
+    36,
+    42,
+    45,
+    46,
+    55,
+    65,
+    69,
+    70,
+    72,
+    76,
+    78,
+    79,
+    80
+  ],
+  "taxi_capacities": [
+    5,
+    4,
+    6,
+    4,
+    3,
+    3,
+    6,
+    5
+  ]
+}

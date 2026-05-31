@@ -138,6 +138,7 @@ def _route_distance(route: List[int], prob: ProblemData) -> float:
 def _evaluate_violations(
     route: List[int],
     prob: ProblemData,
+    vehicle_index: int,
 ) -> float:
     """
     Walk along a fully decoded route and compute the total penalty for:
@@ -161,7 +162,7 @@ def _evaluate_violations(
     penalty: float = 0.0
     N: int = prob.N
     M: int = prob.M
-    Q: int = prob.vehicle_capacity
+    Q: int = prob.capacity_for_vehicle(vehicle_index)
 
     # ── Build a quick lookup: node_id → Request ──────────────────────────
     request_by_pickup: Dict[int, "Request"] = {}   # type: ignore[name-defined]
@@ -256,9 +257,9 @@ def evaluate(solution: Solution1D) -> float:
     routes: List[List[int]] = decode_routes(solution)
 
     route_costs: List[float] = []
-    for route in routes:
+    for vehicle_index, route in enumerate(routes):
         dist: float = _route_distance(route, prob)
-        penalty: float = _evaluate_violations(route, prob)
+        penalty: float = _evaluate_violations(route, prob, vehicle_index)
         route_costs.append(dist + penalty)
 
     # Min-Max objective: the bottleneck (longest) route determines fitness
@@ -286,9 +287,9 @@ def evaluate_detailed(
     penalties: List[float] = []
     total_costs: List[float] = []
 
-    for route in routes:
+    for vehicle_index, route in enumerate(routes):
         d: float = _route_distance(route, prob)
-        p: float = _evaluate_violations(route, prob)
+        p: float = _evaluate_violations(route, prob, vehicle_index)
         distances.append(d)
         penalties.append(p)
         total_costs.append(d + p)

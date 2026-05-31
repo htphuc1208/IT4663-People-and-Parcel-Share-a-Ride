@@ -1,0 +1,95 @@
+{
+  "K": 2,
+  "M": 6,
+  "N": 14,
+  "capacity_mode": "heterogeneous",
+  "notes": [
+    "generated heterogeneous taxi capacities in [3, 6]"
+  ],
+  "parcels": {
+    "1": {
+      "old_request": 1,
+      "quantity": 6
+    },
+    "2": {
+      "old_request": 3,
+      "quantity": 1
+    },
+    "3": {
+      "old_request": 4,
+      "quantity": 3
+    },
+    "4": {
+      "old_request": 8,
+      "quantity": 6
+    },
+    "5": {
+      "old_request": 9,
+      "quantity": 1
+    },
+    "6": {
+      "old_request": 17,
+      "quantity": 5
+    }
+  },
+  "passengers": {
+    "1": {
+      "old_request": 2
+    },
+    "2": {
+      "old_request": 5
+    },
+    "3": {
+      "old_request": 6
+    },
+    "4": {
+      "old_request": 7
+    },
+    "5": {
+      "old_request": 10
+    },
+    "6": {
+      "old_request": 11
+    },
+    "7": {
+      "old_request": 12
+    },
+    "8": {
+      "old_request": 13
+    },
+    "9": {
+      "old_request": 14
+    },
+    "10": {
+      "old_request": 15
+    },
+    "11": {
+      "old_request": 16
+    },
+    "12": {
+      "old_request": 18
+    },
+    "13": {
+      "old_request": 19
+    },
+    "14": {
+      "old_request": 20
+    }
+  },
+  "raw_capacity": 6,
+  "raw_file": "data/raw_darp/ropke_cordeau_2007/part_b/b2-20.txt",
+  "raw_request_count": 20,
+  "seed": 42,
+  "selected_parcels_original": [
+    1,
+    3,
+    4,
+    8,
+    9,
+    17
+  ],
+  "taxi_capacities": [
+    6,
+    3
+  ]
+}

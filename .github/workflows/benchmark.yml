@@ -1,0 +1,50 @@
+name: SARP Benchmark Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python modules
+        run: python -m compileall src
+
+      - name: Validate preprocessing CLI
+        run: |
+          python -m src.preprocess \
+            --raw data/raw_darp/ropke_cordeau_2007/part_a/a2-16.txt \
+            --out /tmp/a2-16.txt \
+            --seed 42 \
+            --capacity-mode heterogeneous \
+            --capacity-min 1 \
+            --capacity-max 3
+
+      - name: Run optimizer smoke benchmark
+        run: |
+          python -m src.main \
+            --instance data/fold1/a2-16.txt \
+            --algorithm all \
+            --seed 42 \
+            --time-limit 1 \
+            --results-dir results
+
+      - name: Upload result artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-results
+          path: results/

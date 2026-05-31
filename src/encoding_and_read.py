@@ -122,7 +122,10 @@ class ProblemData:
     num_vehicles : int  (K)
         Number of available taxis.
     vehicle_capacity : int
-        Seat/load capacity of each taxi.
+        Maximum taxi capacity; kept for backward compatibility with older
+        uniform-capacity instances.
+    vehicle_capacities : List[int]
+        Per-taxi capacities Q[0]..Q[K-1].
     depot_x : float
         X-coordinate of the depot (node 0).
     depot_y : float
@@ -143,6 +146,7 @@ class ProblemData:
     num_parcels: int = 0
     num_vehicles: int = 0
     vehicle_capacity: int = 4
+    vehicle_capacities: List[int] = field(default_factory=list)
     depot_x: float = 0.0
     depot_y: float = 0.0
     passengers: List[Request] = field(default_factory=list)
@@ -184,6 +188,12 @@ class ProblemData:
     def dist(self, node_a: int, node_b: int) -> float:
         """Look up the pre-computed distance between two node IDs."""
         return self.distance_matrix[node_a][node_b]
+
+    def capacity_for_vehicle(self, vehicle_index: int) -> int:
+        """Return the capacity for a zero-based vehicle index."""
+        if self.vehicle_capacities:
+            return self.vehicle_capacities[vehicle_index]
+        return self.vehicle_capacity
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -287,6 +297,24 @@ class Solution1D:
         if len(non_zero) != len(set(non_zero)):
             return False, "Duplicate non-zero node IDs detected"
 
+        expected_nodes = set(range(1, self._problem.N + 1))
+        expected_nodes.update(
+            range(self._problem.N + 1, self._problem.N + self._problem.M + 1)
+        )
+        expected_nodes.update(
+            range(
+                2 * self._problem.N + self._problem.M + 1,
+                2 * self._problem.N + 2 * self._problem.M + 1,
+            )
+        )
+        observed_nodes = set(non_zero)
+        if observed_nodes != expected_nodes:
+            missing = sorted(expected_nodes - observed_nodes)
+            extra = sorted(observed_nodes - expected_nodes)
+            return False, (
+                f"Node set mismatch; missing={missing[:10]}, extra={extra[:10]}"
+            )
+
         return True, "OK"
 
     # ── Copy ────────────────────────────────────────────────────────────
@@ -353,10 +381,11 @@ def read_instance(filepath: str) -> ProblemData:
     Expected file format (adapt the parsing logic to match your actual files):
     ─────────────────────────────────────────────────────────────────────────
     Line 1:  K  N  M  Q  T
+          or K  N  M  Q1 Q2 ... QK  T
              K = number of vehicles
              N = number of passengers
              M = number of parcels
-             Q = vehicle capacity
+             Q = uniform vehicle capacity, or Q1..QK per-taxi capacities
              T = planning horizon
     Line 2:  depot_x  depot_y   (depot coordinates, node 0)
     Lines 3 .. 2+N:   Passenger request rows
@@ -407,8 +436,20 @@ def read_instance(filepath: str) -> ProblemData:
     data.num_vehicles = int(header[0])       # K
     data.num_passengers = int(header[1])     # N
     data.num_parcels = int(header[2])        # M
-    data.vehicle_capacity = int(header[3])   # Q
-    data.planning_horizon = float(header[4]) # T
+    if len(header) == 5:
+        capacity = int(header[3])
+        data.vehicle_capacities = [capacity for _ in range(data.num_vehicles)]
+        data.vehicle_capacity = capacity
+        data.planning_horizon = float(header[4])
+    elif len(header) == data.num_vehicles + 4:
+        capacities = [int(value) for value in header[3 : 3 + data.num_vehicles]]
+        data.vehicle_capacities = capacities
+        data.vehicle_capacity = max(capacities)
+        data.planning_horizon = float(header[3 + data.num_vehicles])
+    else:
+        raise ValueError(
+            "header must be either 'K N M Q T' or 'K N M Q1 ... QK T'"
+        )
 
     # ── Line 2: depot ────────────────────────────────────────────────────
     depot_parts: List[str] = lines[1].split()

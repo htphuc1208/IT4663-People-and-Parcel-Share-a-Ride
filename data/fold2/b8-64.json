@@ -1,0 +1,263 @@
+{
+  "K": 8,
+  "M": 21,
+  "N": 43,
+  "capacity_mode": "heterogeneous",
+  "notes": [
+    "generated heterogeneous taxi capacities in [3, 6]"
+  ],
+  "parcels": {
+    "1": {
+      "old_request": 2,
+      "quantity": 6
+    },
+    "2": {
+      "old_request": 3,
+      "quantity": 6
+    },
+    "3": {
+      "old_request": 6,
+      "quantity": 6
+    },
+    "4": {
+      "old_request": 7,
+      "quantity": 3
+    },
+    "5": {
+      "old_request": 9,
+      "quantity": 3
+    },
+    "6": {
+      "old_request": 14,
+      "quantity": 3
+    },
+    "7": {
+      "old_request": 15,
+      "quantity": 2
+    },
+    "8": {
+      "old_request": 16,
+      "quantity": 3
+    },
+    "9": {
+      "old_request": 18,
+      "quantity": 6
+    },
+    "10": {
+      "old_request": 28,
+      "quantity": 5
+    },
+    "11": {
+      "old_request": 33,
+      "quantity": 6
+    },
+    "12": {
+      "old_request": 35,
+      "quantity": 2
+    },
+    "13": {
+      "old_request": 38,
+      "quantity": 6
+    },
+    "14": {
+      "old_request": 44,
+      "quantity": 3
+    },
+    "15": {
+      "old_request": 48,
+      "quantity": 5
+    },
+    "16": {
+      "old_request": 52,
+      "quantity": 3
+    },
+    "17": {
+      "old_request": 57,
+      "quantity": 2
+    },
+    "18": {
+      "old_request": 59,
+      "quantity": 5
+    },
+    "19": {
+      "old_request": 62,
+      "quantity": 1
+    },
+    "20": {
+      "old_request": 63,
+      "quantity": 5
+    },
+    "21": {
+      "old_request": 64,
+      "quantity": 3
+    }
+  },
+  "passengers": {
+    "1": {
+      "old_request": 1
+    },
+    "2": {
+      "old_request": 4
+    },
+    "3": {
+      "old_request": 5
+    },
+    "4": {
+      "old_request": 8
+    },
+    "5": {
+      "old_request": 10
+    },
+    "6": {
+      "old_request": 11
+    },
+    "7": {
+      "old_request": 12
+    },
+    "8": {
+      "old_request": 13
+    },
+    "9": {
+      "old_request": 17
+    },
+    "10": {
+      "old_request": 19
+    },
+    "11": {
+      "old_request": 20
+    },
+    "12": {
+      "old_request": 21
+    },
+    "13": {
+      "old_request": 22
+    },
+    "14": {
+      "old_request": 23
+    },
+    "15": {
+      "old_request": 24
+    },
+    "16": {
+      "old_request": 25
+    },
+    "17": {
+      "old_request": 26
+    },
+    "18": {
+      "old_request": 27
+    },
+    "19": {
+      "old_request": 29
+    },
+    "20": {
+      "old_request": 30
+    },
+    "21": {
+      "old_request": 31
+    },
+    "22": {
+      "old_request": 32
+    },
+    "23": {
+      "old_request": 34
+    },
+    "24": {
+      "old_request": 36
+    },
+    "25": {
+      "old_request": 37
+    },
+    "26": {
+      "old_request": 39
+    },
+    "27": {
+      "old_request": 40
+    },
+    "28": {
+      "old_request": 41
+    },
+    "29": {
+      "old_request": 42
+    },
+    "30": {
+      "old_request": 43
+    },
+    "31": {
+      "old_request": 45
+    },
+    "32": {
+      "old_request": 46
+    },
+    "33": {
+      "old_request": 47
+    },
+    "34": {
+      "old_request": 49
+    },
+    "35": {
+      "old_request": 50
+    },
+    "36": {
+      "old_request": 51
+    },
+    "37": {
+      "old_request": 53
+    },
+    "38": {
+      "old_request": 54
+    },
+    "39": {
+      "old_request": 55
+    },
+    "40": {
+      "old_request": 56
+    },
+    "41": {
+      "old_request": 58
+    },
+    "42": {
+      "old_request": 60
+    },
+    "43": {
+      "old_request": 61
+    }
+  },
+  "raw_capacity": 6,
+  "raw_file": "data/raw_darp/ropke_cordeau_2007/part_b/b8-64.txt",
+  "raw_request_count": 64,
+  "seed": 42,
+  "selected_parcels_original": [
+    2,
+    3,
+    6,
+    7,
+    9,
+    14,
+    15,
+    16,
+    18,
+    28,
+    33,
+    35,
+    38,
+    44,
+    48,
+    52,
+    57,
+    59,
+    62,
+    63,
+    64
+  ],
+  "taxi_capacities": [
+    4,
+    5,
+    6,
+    4,
+    6,
+    3,
+    5,
+    3
+  ]
+}

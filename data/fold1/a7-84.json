@@ -1,0 +1,337 @@
+{
+  "K": 7,
+  "M": 28,
+  "N": 56,
+  "capacity_mode": "heterogeneous",
+  "notes": [
+    "ignored terminal depot node 169; coordinates match node 0",
+    "generated heterogeneous taxi capacities in [1, 3]"
+  ],
+  "parcels": {
+    "1": {
+      "old_request": 1,
+      "quantity": 1
+    },
+    "2": {
+      "old_request": 4,
+      "quantity": 1
+    },
+    "3": {
+      "old_request": 5,
+      "quantity": 1
+    },
+    "4": {
+      "old_request": 12,
+      "quantity": 1
+    },
+    "5": {
+      "old_request": 14,
+      "quantity": 1
+    },
+    "6": {
+      "old_request": 15,
+      "quantity": 1
+    },
+    "7": {
+      "old_request": 18,
+      "quantity": 1
+    },
+    "8": {
+      "old_request": 26,
+      "quantity": 1
+    },
+    "9": {
+      "old_request": 28,
+      "quantity": 1
+    },
+    "10": {
+      "old_request": 29,
+      "quantity": 1
+    },
+    "11": {
+      "old_request": 30,
+      "quantity": 1
+    },
+    "12": {
+      "old_request": 32,
+      "quantity": 1
+    },
+    "13": {
+      "old_request": 36,
+      "quantity": 1
+    },
+    "14": {
+      "old_request": 38,
+      "quantity": 1
+    },
+    "15": {
+      "old_request": 49,
+      "quantity": 1
+    },
+    "16": {
+      "old_request": 52,
+      "quantity": 1
+    },
+    "17": {
+      "old_request": 54,
+      "quantity": 1
+    },
+    "18": {
+      "old_request": 55,
+      "quantity": 1
+    },
+    "19": {
+      "old_request": 56,
+      "quantity": 1
+    },
+    "20": {
+      "old_request": 64,
+      "quantity": 1
+    },
+    "21": {
+      "old_request": 65,
+      "quantity": 1
+    },
+    "22": {
+      "old_request": 70,
+      "quantity": 1
+    },
+    "23": {
+      "old_request": 72,
+      "quantity": 1
+    },
+    "24": {
+      "old_request": 75,
+      "quantity": 1
+    },
+    "25": {
+      "old_request": 78,
+      "quantity": 1
+    },
+    "26": {
+      "old_request": 79,
+      "quantity": 1
+    },
+    "27": {
+      "old_request": 82,
+      "quantity": 1
+    },
+    "28": {
+      "old_request": 84,
+      "quantity": 1
+    }
+  },
+  "passengers": {
+    "1": {
+      "old_request": 2
+    },
+    "2": {
+      "old_request": 3
+    },
+    "3": {
+      "old_request": 6
+    },
+    "4": {
+      "old_request": 7
+    },
+    "5": {
+      "old_request": 8
+    },
+    "6": {
+      "old_request": 9
+    },
+    "7": {
+      "old_request": 10
+    },
+    "8": {
+      "old_request": 11
+    },
+    "9": {
+      "old_request": 13
+    },
+    "10": {
+      "old_request": 16
+    },
+    "11": {
+      "old_request": 17
+    },
+    "12": {
+      "old_request": 19
+    },
+    "13": {
+      "old_request": 20
+    },
+    "14": {
+      "old_request": 21
+    },
+    "15": {
+      "old_request": 22
+    },
+    "16": {
+      "old_request": 23
+    },
+    "17": {
+      "old_request": 24
+    },
+    "18": {
+      "old_request": 25
+    },
+    "19": {
+      "old_request": 27
+    },
+    "20": {
+      "old_request": 31
+    },
+    "21": {
+      "old_request": 33
+    },
+    "22": {
+      "old_request": 34
+    },
+    "23": {
+      "old_request": 35
+    },
+    "24": {
+      "old_request": 37
+    },
+    "25": {
+      "old_request": 39
+    },
+    "26": {
+      "old_request": 40
+    },
+    "27": {
+      "old_request": 41
+    },
+    "28": {
+      "old_request": 42
+    },
+    "29": {
+      "old_request": 43
+    },
+    "30": {
+      "old_request": 44
+    },
+    "31": {
+      "old_request": 45
+    },
+    "32": {
+      "old_request": 46
+    },
+    "33": {
+      "old_request": 47
+    },
+    "34": {
+      "old_request": 48
+    },
+    "35": {
+      "old_request": 50
+    },
+    "36": {
+      "old_request": 51
+    },
+    "37": {
+      "old_request": 53
+    },
+    "38": {
+      "old_request": 57
+    },
+    "39": {
+      "old_request": 58
+    },
+    "40": {
+      "old_request": 59
+    },
+    "41": {
+      "old_request": 60
+    },
+    "42": {
+      "old_request": 61
+    },
+    "43": {
+      "old_request": 62
+    },
+    "44": {
+      "old_request": 63
+    },
+    "45": {
+      "old_request": 66
+    },
+    "46": {
+      "old_request": 67
+    },
+    "47": {
+      "old_request": 68
+    },
+    "48": {
+      "old_request": 69
+    },
+    "49": {
+      "old_request": 71
+    },
+    "50": {
+      "old_request": 73
+    },
+    "51": {
+      "old_request": 74
+    },
+    "52": {
+      "old_request": 76
+    },
+    "53": {
+      "old_request": 77
+    },
+    "54": {
+      "old_request": 80
+    },
+    "55": {
+      "old_request": 81
+    },
+    "56": {
+      "old_request": 83
+    }
+  },
+  "raw_capacity": 3,
+  "raw_file": "data/raw_darp/ropke_cordeau_2007/part_a/a7-84.txt",
+  "raw_request_count": 84,
+  "seed": 42,
+  "selected_parcels_original": [
+    1,
+    4,
+    5,
+    12,
+    14,
+    15,
+    18,
+    26,
+    28,
+    29,
+    30,
+    32,
+    36,
+    38,
+    49,
+    52,
+    54,
+    55,
+    56,
+    64,
+    65,
+    70,
+    72,
+    75,
+    78,
+    79,
+    82,
+    84
+  ],
+  "taxi_capacities": [
+    2,
+    1,
+    3,
+    2,
+    2,
+    1,
+    3
+  ]
+}
