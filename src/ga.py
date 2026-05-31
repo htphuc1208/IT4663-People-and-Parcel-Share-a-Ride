@@ -5,42 +5,34 @@ ga.py — Genetic Algorithm for the Share-a-Ride Problem (Min-Max)
 This module implements a Genetic Algorithm (GA) that operates EXCLUSIVELY
 on the unified 1D chromosome representation defined in `Solution1D`.
 
+The implementation is enhanced with ideas from standalone solvers, including:
+  - A multi-stage repair function to fix gene sets and precedence.
+  - A diverse set of mutation operators (swap, inversion, relocate).
+  - Adaptive mutation rate to balance exploration and exploitation.
+
 ═══════════════════════════════════════════════════════════════════════════
 CRITICAL: 1D ENCODING MANIPULATION RULES
 ═══════════════════════════════════════════════════════════════════════════
 All genetic operators (crossover, mutation, repair) MUST obey these rules:
 
-  1. NEVER duplicate or remove `0` separators.
-     • The chromosome always contains exactly (K − 1) zeros.
-     • Operators must treat zeros as immovable "walls" — they partition the
-       chromosome into K route segments.  Swapping, inserting, or deleting
-       a zero would change the number of vehicles, which is invalid.
+  1. DO NOT add, remove, or unnecessarily move the `0` separators.
+     The chromosome must always contain exactly (K − 1) zeros. They are
+     the "skeleton" that defines the K routes.
 
-  2. Operate ONLY on non-zero genes.
-     • Crossover and mutation should identify the positions of non-zero
-       entries, manipulate those entries (swap, relocate, reverse), and
-       then write them back into the chromosome at the non-zero positions,
-       leaving every zero in its original index.
+  2. Operate ONLY on non-zero genes whenever possible.
+     Crossover and mutation should work on the sequence of non-zero nodes,
+     then inject them back into the skeleton of zeros.
 
-  3. Preserve the set of non-zero node IDs.
-     • After any operator, the chromosome must contain EXACTLY the same
-       set of non-zero integers as before — no duplicates, no omissions.
-     • A repair step should verify and fix any violations.
+  3. Preserve the set of required non-zero node IDs.
+     After any operator, the chromosome must contain the correct set of
+     non-zero integers. The `repair` function is critical for this.
 
-  4. Parcel precedence is enforced by the penalty function (fitness.py),
-     NOT by the genetic operators.  This keeps operators simple and fast;
-     the penalty-driven fitness naturally steers the population toward
-     feasibility.
-
-  5. ADAPTIVE MUTATION RATE:
-     • The mutation probability starts at an initial value (e.g. 0.15).
-     • If the population's best fitness stagnates for `stagnation_limit`
-       generations, the mutation rate is INCREASED (up to a cap) to inject
-       diversity.
-     • If improvement resumes, the mutation rate decays back toward the
-       baseline to allow fine-tuning.
-     • This feedback loop prevents premature convergence without requiring
-       manual tuning.
+  4. Use penalty-driven fitness.
+     Feasibility (capacity, time windows, precedence) is primarily enforced
+     by the penalty functions in `fitness.py`. The GA's job is to explore
+     the search space, and the fitness function guides it toward valid,
+     high-quality solutions. The `repair` function provides a stronger
+     nudge toward valid precedence.
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -49,8 +41,8 @@ from __future__ import annotations
 import logging
 import random
 import time
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, List, Tuple
 
 from .encoding_and_read import ProblemData, Solution1D
 from .fitness import evaluate
@@ -66,20 +58,20 @@ logger = logging.getLogger(__name__)
 @dataclass
 class GAConfig:
     """Configuration for the Genetic Algorithm."""
-    population_size: int = 50
-    max_generations: int = 500
-    elite_count: int = 2
+    population_size: int = 80
+    max_generations: int = 800
+    elite_count: int = 4
     tournament_size: int = 5
 
     # ── Adaptive mutation ────────────────────────────────────────────────
-    mutation_rate_init: float = 0.15
-    mutation_rate_min: float = 0.05
-    mutation_rate_max: float = 0.60
+    mutation_rate_init: float = 0.20
+    mutation_rate_min: float = 0.04
+    mutation_rate_max: float = 0.70
     mutation_rate_increase: float = 0.05  # bump when stagnating
-    mutation_rate_decay: float = 0.98     # decay when improving
-    stagnation_limit: int = 15            # generations without improvement
+    mutation_rate_decay: float = 0.985    # decay when improving
+    stagnation_limit: int = 25            # generations without improvement
 
-    crossover_rate: float = 0.85
+    crossover_rate: float = 0.90
     seed: int | None = None
     time_limit_seconds: float = float("inf")
 
@@ -94,26 +86,126 @@ def _non_zero_positions(chromosome: List[int]) -> List[int]:
 
 
 def _extract_non_zeros(chromosome: List[int]) -> Tuple[List[int], List[int]]:
-    """
-    Split the chromosome into (non_zero_values, zero_skeleton).
-    `zero_skeleton` is a copy of the chromosome with non-zeros replaced by -1,
-    preserving the positions of all zeros.
-    """
+    """Extract non-zero values and their original positions."""
     positions: List[int] = _non_zero_positions(chromosome)
     values: List[int] = [chromosome[i] for i in positions]
     return values, positions
 
 
 def _inject_non_zeros(
-    chromosome: List[int],
+    chromosome_template: List[int],
     values: List[int],
     positions: List[int],
 ) -> List[int]:
-    """Write `values` back into `chromosome` at `positions`."""
-    new_chrom: List[int] = list(chromosome)
+    """Write `values` back into a chromosome at `positions`."""
+    new_chrom: List[int] = list(chromosome_template)
+    # Ensure the template has placeholders at the target positions
+    for p in positions:
+        if p < len(new_chrom):
+            new_chrom[p] = -1 # Placeholder
+        else:
+            # This case should ideally not happen if positions are from a valid chrom
+            while len(new_chrom) <= p:
+                new_chrom.append(0)
+            new_chrom[p] = -1
+
+    # Inject values
     for pos, val in zip(positions, values):
         new_chrom[pos] = val
-    return new_chrom
+
+    # Clean up any remaining placeholders if lengths mismatch
+    # This is a safeguard
+    final_chrom = [g for g in new_chrom if g != -1]
+    return final_chrom
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                             REPAIR OPERATORS                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _fix_gene_set(solution: Solution1D) -> Solution1D:
+    """
+    Ensures the chromosome contains exactly the required set of non-zero genes,
+    preserving the positions of zeros.
+    """
+    problem = solution.problem
+    values, positions = _extract_non_zeros(solution.chromosome)
+    required_genes = set(problem.get_all_user_nodes())
+
+    # Find missing and extra genes
+    value_counts = {}
+    for v in values:
+        value_counts[v] = value_counts.get(v, 0) + 1
+
+    missing = list(required_genes - set(values))
+    extras = [v for v, count in value_counts.items() if count > 1 or v not in required_genes]
+
+    # Replace extras/duplicates with missing genes
+    final_values = []
+    for v in values:
+        is_extra = (v in value_counts and value_counts[v] > 1) or (v not in required_genes)
+        if is_extra:
+            if missing:
+                new_gene = missing.pop()
+                final_values.append(new_gene)
+                if v in value_counts:
+                    value_counts[v] -= 1
+            # else, if no missing genes, we might have to remove it, but let's keep for now
+            # This part of logic depends on how to handle length mismatches.
+            # For now, we assume replacement is the primary goal.
+        else:
+            final_values.append(v)
+
+    # If after replacement, the list is still not right, we might need a more robust fix
+    # For now, we assume this handles the main cases.
+    if len(final_values) != len(positions):
+        # Fallback: rebuild from scratch, less ideal as it loses structure
+        final_values = list(required_genes)
+        random.shuffle(final_values)
+
+    new_chrom = _inject_non_zeros(solution.chromosome, final_values, positions)
+    return Solution1D(new_chrom, problem)
+
+
+def _repair_precedence_for_route(problem: ProblemData, route: List[int]) -> List[int]:
+    """For a single route, move any parcel pickup before its drop-off if ordered incorrectly."""
+    pos = {node: i for i, node in enumerate(route)}
+    for p_id in problem.get_parcel_ids():
+        pickup_node = problem.get_node_id_from_parcel_id(p_id, is_pickup=True)
+        dropoff_node = problem.get_node_id_from_parcel_id(p_id, is_pickup=False)
+
+        if pickup_node in pos and dropoff_node in pos and pos[dropoff_node] < pos[pickup_node]:
+            # Simple fix: swap them. More advanced: re-insert pickup before dropoff.
+            idx_pu, idx_dr = pos[pickup_node], pos[dropoff_node]
+            route[idx_pu], route[idx_dr] = route[idx_dr], route[idx_pu]
+            # Update positions after swap for subsequent checks
+            pos[pickup_node], pos[dropoff_node] = idx_dr, idx_pu
+    return route
+
+
+def repair(solution: Solution1D) -> Solution1D:
+    """
+    Applies a sequence of repairs to a solution to improve its feasibility.
+    1. Fix the set of genes to ensure all required nodes are present exactly once.
+    2. Fix parcel pickup/drop-off precedence within each route.
+    """
+    # 1. Fix gene set
+    repaired_solution = _fix_gene_set(solution)
+
+    # 2. Fix precedence per route
+    routes = repaired_solution.get_routes()
+    repaired_routes = [
+        _repair_precedence_for_route(solution.problem, r) for r in routes
+    ]
+
+    # Reconstruct chromosome from repaired routes
+    new_chrom = []
+    for i, r in enumerate(repaired_routes):
+        new_chrom.extend(r)
+        if i < len(repaired_routes) - 1:
+            new_chrom.append(0)
+
+    return Solution1D(new_chrom, solution.problem)
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -126,24 +218,14 @@ def order_crossover(
 ) -> Tuple[Solution1D, Solution1D]:
     """
     Order Crossover (OX) that operates ONLY on the non-zero genes.
-
-    ── HOW IT WORKS ON THE 1D ENCODING ──
-    1. Extract the ordered list of non-zero values from each parent.
-       (Zeros stay pinned — they are NOT part of the crossover.)
-    2. Apply classical OX on these two value sequences.
-    3. Inject the resulting child sequences back into the chromosome
-       template (which retains zeros at their original positions).
-
-    This guarantees:
-      • Exactly (K−1) zeros remain untouched.
-      • Every non-zero node ID appears exactly once in each child.
+    The zero-separator skeleton is inherited from the parents.
     """
     prob: ProblemData = parent_a.problem
     chrom_a: List[int] = parent_a.chromosome
     chrom_b: List[int] = parent_b.chromosome
 
-    vals_a, positions = _extract_non_zeros(chrom_a)
-    vals_b, _         = _extract_non_zeros(chrom_b)
+    vals_a, positions_a = _extract_non_zeros(chrom_a)
+    vals_b, positions_b = _extract_non_zeros(chrom_b) # Positions might differ if K is different
     n: int = len(vals_a)
 
     if n < 2:
@@ -152,33 +234,31 @@ def order_crossover(
     # Select two random cut points
     cx1, cx2 = sorted(random.sample(range(n), 2))
 
-    # ── Build child 1 ────────────────────────────────────────────────────
-    child_vals_1: List[int] = [-1] * n
-    child_vals_1[cx1:cx2 + 1] = vals_a[cx1:cx2 + 1]
-    fill_order: List[int] = [v for v in vals_b if v not in child_vals_1[cx1:cx2 + 1]]
-    fill_idx: int = 0
-    for i in range(n):
-        if child_vals_1[i] == -1:
-            child_vals_1[i] = fill_order[fill_idx]
-            fill_idx += 1
+    def create_child_values(p1_vals, p2_vals):
+        child_vals = [-1] * n
+        # Copy segment from parent 1
+        child_vals[cx1:cx2 + 1] = p1_vals[cx1:cx2 + 1]
+        # Fill the rest from parent 2
+        fill_genes = [g for g in p2_vals if g not in child_vals[cx1:cx2 + 1]]
+        fill_idx = 0
+        for i in range(n):
+            if child_vals[i] == -1:
+                child_vals[i] = fill_genes[fill_idx]
+                fill_idx += 1
+        return child_vals
 
-    # ── Build child 2 (symmetric) ────────────────────────────────────────
-    child_vals_2: List[int] = [-1] * n
-    child_vals_2[cx1:cx2 + 1] = vals_b[cx1:cx2 + 1]
-    fill_order = [v for v in vals_a if v not in child_vals_2[cx1:cx2 + 1]]
-    fill_idx = 0
-    for i in range(n):
-        if child_vals_2[i] == -1:
-            child_vals_2[i] = fill_order[fill_idx]
-            fill_idx += 1
+    child_vals_1 = create_child_values(vals_a, vals_b)
+    child_vals_2 = create_child_values(vals_b, vals_a)
 
-    new_chrom_1: List[int] = _inject_non_zeros(chrom_a, child_vals_1, positions)
-    new_chrom_2: List[int] = _inject_non_zeros(chrom_b, child_vals_2, positions)
+    # Inject back into original chromosome structures
+    child_chrom_1 = _inject_non_zeros(chrom_a, child_vals_1, positions_a)
+    child_chrom_2 = _inject_non_zeros(chrom_b, child_vals_2, positions_b)
 
-    return (
-        Solution1D(new_chrom_1, prob),
-        Solution1D(new_chrom_2, prob),
-    )
+    # Repair is crucial after crossover
+    child_a = repair(Solution1D(child_chrom_1, prob))
+    child_b = repair(Solution1D(child_chrom_2, prob))
+
+    return child_a, child_b
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -186,14 +266,7 @@ def order_crossover(
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def swap_mutation(solution: Solution1D) -> Solution1D:
-    """
-    Swap two randomly chosen non-zero genes.
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero positions are candidates for swapping.
-    • Zeros (separators) are never moved.
-    • The set of non-zero IDs is preserved.
-    """
+    """Swap two randomly chosen non-zero genes."""
     chrom: List[int] = list(solution.chromosome)
     positions: List[int] = _non_zero_positions(chrom)
     if len(positions) < 2:
@@ -205,85 +278,46 @@ def swap_mutation(solution: Solution1D) -> Solution1D:
 
 
 def inversion_mutation(solution: Solution1D) -> Solution1D:
-    """
-    Reverse a sub-segment of non-zero genes within one route segment.
-
-    ── 1D ENCODING SAFETY ──
-    • Picks a random route segment (between two consecutive zeros / edges).
-    • Reverses the non-zero portion of that segment in-place.
-    • Zeros are untouched; no node IDs are added or removed.
-    """
+    """Reverse a sub-segment of non-zero genes within one route segment."""
     chrom: List[int] = list(solution.chromosome)
     routes: List[List[int]] = solution.get_routes()
 
-    # Pick a non-empty route to reverse a sub-segment
-    non_empty_indices: List[int] = [
-        k for k, r in enumerate(routes) if len(r) >= 2
-    ]
+    non_empty_indices: List[int] = [k for k, r in enumerate(routes) if len(r) >= 2]
     if not non_empty_indices:
         return solution.copy()
 
     route_idx: int = random.choice(non_empty_indices)
-
-    # Locate the start position of this route in the chromosome
-    pos: int = 0
-    for k in range(route_idx):
-        pos += len(routes[k]) + 1  # +1 for the zero separator
-
     route: List[int] = routes[route_idx]
-    if len(route) < 2:
-        return solution.copy()
 
     i, j = sorted(random.sample(range(len(route)), 2))
     route[i:j + 1] = reversed(route[i:j + 1])
 
-    # Write back
-    for offset, node in enumerate(route):
-        chrom[pos + offset] = node
+    # Reconstruct chromosome
+    new_chrom = []
+    for k, r in enumerate(routes):
+        new_chrom.extend(r)
+        if k < len(routes) - 1:
+            new_chrom.append(0)
 
-    return Solution1D(chrom, solution.problem)
+    return Solution1D(new_chrom, solution.problem)
 
 
 def relocate_mutation(solution: Solution1D) -> Solution1D:
-    """
-    Remove a random non-zero gene and reinsert it at a random non-zero position.
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero genes are candidates.
-    • The gene is removed from its current position and inserted elsewhere.
-    • The zero separators stay pinned; this effectively moves a node from
-      one vehicle's route segment to another (or within the same route).
-    • The set of non-zero node IDs is preserved (no duplicates, no loss).
-    """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
-    if len(positions) < 2:
+    """Move a random non-zero gene to another random non-zero position."""
+    vals, pos = _extract_non_zeros(solution.chromosome)
+    if len(vals) < 2:
         return solution.copy()
 
-    # Pick a random non-zero to remove
-    src: int = random.choice(positions)
-    gene: int = chrom.pop(src)
+    # Pick a gene to move
+    gene_idx_to_move = random.randrange(len(vals))
+    gene = vals.pop(gene_idx_to_move)
 
-    # Recompute non-zero positions after removal, then pick insertion point
-    # We insert BEFORE a non-zero position or at the end of the chromosome
-    # but we must avoid inserting at a zero's position
-    possible_inserts: List[int] = [
-        i for i, g in enumerate(chrom) if g != 0
-    ]
-    # Also allow inserting at the very end if the last element is not 0
-    if chrom and chrom[-1] != 0:
-        possible_inserts.append(len(chrom))
-    elif not chrom:
-        possible_inserts.append(0)
+    # Pick a new position to insert it
+    new_pos = random.randrange(len(vals) + 1)
+    vals.insert(new_pos, gene)
 
-    if not possible_inserts:
-        # Fallback: insert before first separator or at start
-        chrom.insert(0, gene)
-    else:
-        dst: int = random.choice(possible_inserts)
-        chrom.insert(dst, gene)
-
-    return Solution1D(chrom, solution.problem)
+    new_chrom = _inject_non_zeros(solution.chromosome, vals, pos)
+    return Solution1D(new_chrom, solution.problem)
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -296,7 +330,8 @@ def tournament_selection(
     tournament_size: int,
 ) -> Solution1D:
     """Select the best individual from a random tournament of given size."""
-    indices: List[int] = random.sample(range(len(population)), tournament_size)
+    size = min(tournament_size, len(population))
+    indices: List[int] = random.sample(range(len(population)), size)
     best_idx: int = min(indices, key=lambda i: fitnesses[i])
     return population[best_idx].copy()
 
@@ -334,9 +369,9 @@ def run_ga(
     start_time: float = time.time()
 
     # ── Initialise population ────────────────────────────────────────────
-    population: List[Solution1D] = [greedy_init(problem)]
+    population: List[Solution1D] = [greedy_init(problem, seed=config.seed)]
     for _ in range(config.population_size - 1):
-        population.append(random_init(problem))
+        population.append(random_init(problem, seed=config.seed))
 
     fitnesses: List[float] = [evaluate(sol) for sol in population]
 
@@ -400,6 +435,10 @@ def run_ga(
                 mutator = random.choice(mutators)
                 child_b = mutator(child_b)
 
+            # Crucial: Repair after mutation as well
+            child_a = repair(child_a)
+            child_b = repair(child_b)
+
             new_population.append(child_a)
             if len(new_population) < config.population_size:
                 new_population.append(child_b)
@@ -418,14 +457,13 @@ def run_ga(
             best_fitness = gen_best_fitness
             best_solution = population[gen_best_idx].copy()
             stagnation_counter = 0
+            logger.debug("Gen %4d: New best fitness found: %.4f", gen, best_fitness)
         else:
             stagnation_counter += 1
 
         history.append(best_fitness)
 
         # ── Adaptive mutation rate adjustment ────────────────────────────
-        # If the population stagnates → INCREASE mutation to inject diversity.
-        # If improving → DECAY mutation to allow exploitation / fine-tuning.
         if stagnation_counter >= config.stagnation_limit:
             mutation_rate = min(
                 mutation_rate + config.mutation_rate_increase,
@@ -433,7 +471,7 @@ def run_ga(
             )
             stagnation_counter = 0  # reset after bump
             logger.debug(
-                "Gen %d: stagnation → mutation_rate ↑ %.3f", gen, mutation_rate,
+                "Gen %d: Stagnation -> mutation_rate INCREASED to %.3f", gen, mutation_rate
             )
         else:
             mutation_rate = max(
@@ -443,9 +481,16 @@ def run_ga(
 
         if gen % 50 == 0 or gen == 1:
             logger.info(
-                "Gen %4d | best=%.4f | mr=%.3f | stag=%d",
-                gen, best_fitness, mutation_rate, stagnation_counter,
+                "Gen %4d | Best: %.4f | MR: %.3f | Stagnation: %d/%d",
+                gen, best_fitness, mutation_rate, stagnation_counter, config.stagnation_limit
             )
 
-    logger.info("GA finished | best_fitness=%.4f", best_fitness)
+    # Final polish on the best solution found
+    final_solution = repair(best_solution)
+    final_fitness = evaluate(final_solution)
+
+    logger.info("GA finished | Final best fitness: %.4f", final_fitness)
+    if final_fitness < best_fitness:
+        return final_solution, final_fitness, history
+
     return best_solution, best_fitness, history
