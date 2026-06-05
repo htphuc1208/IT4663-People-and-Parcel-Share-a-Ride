@@ -48,3 +48,5 @@ jobs:
         with:
           name: smoke-results
           path: results/
+# .out : kq
+# report: obj_value; total_distance; error if any; time; algorithm; seed

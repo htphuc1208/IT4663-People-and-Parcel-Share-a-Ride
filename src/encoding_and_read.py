@@ -378,7 +378,16 @@ def read_instance(filepath: str) -> ProblemData:
     """
     Parse a SARP instance from a plain-text (.txt) file.
 
-    Expected file format (adapt the parsing logic to match your actual files):
+    Supported file formats:
+    ─────────────────────────────────────────────────────────────────────────
+    Official Project 11 matrix format:
+    Line 1:  N  M  K
+    Line 2:  q[1] ... q[M]
+    Line 3:  Q[1] ... Q[K]
+    Lines 4 .. 4+2N+2M:
+             distance matrix rows d[0] .. d[2N+2M]
+
+    Internal fold format:
     ─────────────────────────────────────────────────────────────────────────
     Line 1:  K  N  M  Q  T
           or K  N  M  Q1 Q2 ... QK  T
@@ -431,8 +440,11 @@ def read_instance(filepath: str) -> ProblemData:
     if not lines:
         raise ValueError(f"Instance file is empty: {path}")
 
-    # ── Line 1: header ──────────────────────────────────────────────────
     header: List[str] = lines[0].split()
+    if len(header) == 3:
+        return _read_official_matrix_instance(path, lines)
+
+    # ── Line 1: header ──────────────────────────────────────────────────
     data.num_vehicles = int(header[0])       # K
     data.num_passengers = int(header[1])     # N
     data.num_parcels = int(header[2])        # M
@@ -564,13 +576,82 @@ def read_instance(filepath: str) -> ProblemData:
     return data
 
 
+def _read_official_matrix_instance(path: Path, lines: List[str]) -> ProblemData:
+    """Parse the Project 11 official matrix format: N M K, q, Q, d."""
+    data = ProblemData(name=path.stem)
+    data.num_passengers, data.num_parcels, data.num_vehicles = map(
+        int,
+        lines[0].split(),
+    )
+    q = [int(value) for value in lines[1].split()]
+    capacities = [int(value) for value in lines[2].split()]
+    if len(q) != data.num_parcels:
+        raise ValueError(f"expected {data.num_parcels} parcel quantities, got {len(q)}")
+    if len(capacities) != data.num_vehicles:
+        raise ValueError(f"expected {data.num_vehicles} taxi capacities, got {len(capacities)}")
+
+    node_count = 2 * data.N + 2 * data.M + 1
+    matrix_lines = lines[3:]
+    if len(matrix_lines) != node_count:
+        raise ValueError(f"expected {node_count} distance rows, got {len(matrix_lines)}")
+
+    matrix: List[List[float]] = []
+    for row_index, line in enumerate(matrix_lines):
+        row = [float(value) for value in line.split()]
+        if len(row) != node_count:
+            raise ValueError(
+                f"distance row {row_index} expected {node_count} values, got {len(row)}"
+            )
+        matrix.append(row)
+
+    data.vehicle_capacities = capacities
+    data.vehicle_capacity = max(capacities)
+    data.planning_horizon = float("inf")
+    data.depot_x = 0.0
+    data.depot_y = 0.0
+    data.coords = [(0.0, 0.0) for _ in range(node_count)]
+    data.distance_matrix = matrix
+
+    for passenger_id in range(1, data.N + 1):
+        data.passengers.append(
+            Request(
+                request_id=passenger_id,
+                request_type=RequestType.PASSENGER,
+                pickup_node=passenger_id,
+                dropoff_node=passenger_id + data.N + data.M,
+                pickup_x=0.0,
+                pickup_y=0.0,
+                dropoff_x=0.0,
+                dropoff_y=0.0,
+                demand=0,
+            )
+        )
+
+    for parcel_id in range(1, data.M + 1):
+        data.parcels.append(
+            Request(
+                request_id=data.N + parcel_id,
+                request_type=RequestType.PARCEL,
+                pickup_node=data.N + parcel_id,
+                dropoff_node=2 * data.N + data.M + parcel_id,
+                pickup_x=0.0,
+                pickup_y=0.0,
+                dropoff_x=0.0,
+                dropoff_y=0.0,
+                demand=q[parcel_id - 1],
+            )
+        )
+
+    return data
+
+
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                     FOLD / BATCH LOADING HELPERS                         ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def list_instances_in_fold(fold_dir: str) -> List[str]:
     """
-    Return sorted list of .txt instance file paths inside a fold directory.
+    Return sorted list of .txt/.in instance file paths inside a fold directory.
 
     Parameters
     ----------
@@ -585,14 +666,13 @@ def list_instances_in_fold(fold_dir: str) -> List[str]:
     fold_path: Path = Path(fold_dir).resolve()
     if not fold_path.is_dir():
         raise FileNotFoundError(f"Fold directory not found: {fold_path}")
-    return sorted(
-        str(p) for p in fold_path.glob("*.txt")
-    )
+    paths = list(fold_path.glob("*.txt")) + list(fold_path.glob("*.in"))
+    return sorted(str(p) for p in paths)
 
 
 def load_fold(fold_dir: str) -> List[ProblemData]:
     """
-    Convenience: parse every .txt instance in *fold_dir* and return them.
+    Convenience: parse every .txt/.in instance in *fold_dir* and return them.
 
     Parameters
     ----------

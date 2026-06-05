@@ -1,0 +1,14 @@
+{
+  "K": 8,
+  "M": 30,
+  "N": 30,
+  "Q_max": 129,
+  "Q_min": 101,
+  "capacity_profile": "balanced",
+  "format": "official_matrix",
+  "node_count": 121,
+  "profile": "asymmetric",
+  "q_max": 99,
+  "q_min": 1,
+  "seed": 2040
+}

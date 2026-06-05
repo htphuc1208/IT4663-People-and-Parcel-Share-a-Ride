@@ -1,0 +1,14 @@
+{
+  "K": 12,
+  "M": 80,
+  "N": 5,
+  "Q_max": 109,
+  "Q_min": 85,
+  "capacity_profile": "tight",
+  "format": "official_matrix",
+  "node_count": 171,
+  "profile": "random",
+  "q_max": 99,
+  "q_min": 50,
+  "seed": 2038
+}

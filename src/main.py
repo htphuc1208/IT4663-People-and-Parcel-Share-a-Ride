@@ -5,7 +5,7 @@ main.py — CLI Entry Point for the SARP Min-Max Optimizer
 This script provides an ``argparse``-based command-line interface that:
   1. Reads a SARP instance from one of the 3 data folds.
   2. Generates an initial solution via greedy heuristic.
-  3. Runs the user-selected algorithm (GA, Tabu, ALNS, or all).
+  3. Runs the user-selected algorithm (GA, Tabu, ALNS, OR-Tools, or all).
   4. Logs progress and saves results to the ``results/`` directory.
 
 Usage Examples
@@ -22,6 +22,9 @@ Usage Examples
 
   # Verbose debug logging
   python -m src.main --instance data/fold1/instance_01.txt --algorithm alns -v
+
+  # Run the optional Google OR-Tools routing solver
+  python -m src.main --instance data/official/small/small_01.in --algorithm ortools
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from .init import greedy_init
 from .ga import GAConfig, run_ga
 from .tabu import TabuConfig, run_tabu
 from .alns import ALNSConfig, run_alns
+from .ortools_solver import ORToolsConfig, run_ortools
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                           LOGGING SETUP                                  ║
@@ -131,7 +135,7 @@ def _run_algorithm(
     Parameters
     ----------
     algorithm : str
-        One of 'ga', 'tabu', 'alns'.
+        One of 'ga', 'tabu', 'alns', 'ortools'.
     problem : ProblemData
         Parsed instance data.
     seed : int | None
@@ -163,6 +167,11 @@ def _run_algorithm(
         config_al = ALNSConfig(seed=seed, time_limit_seconds=time_limit)
         best_sol, best_fit, hist = run_alns(problem, config_al)
         cfg_dict = config_al.__dict__
+
+    elif algorithm == "ortools":
+        config_or = ORToolsConfig(time_limit_seconds=time_limit)
+        best_sol, best_fit, hist = run_ortools(problem, config_or)
+        cfg_dict = config_or.__dict__
 
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
@@ -204,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="sarp_optimizer",
         description=(
             "Share-a-Ride Problem (SARP) Min-Max Optimizer — "
-            "GA / Tabu Search / ALNS with Unified 1D Encoding"
+            "GA / Tabu Search / ALNS / OR-Tools with Unified 1D Encoding"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -215,21 +224,21 @@ def build_parser() -> argparse.ArgumentParser:
     input_group.add_argument(
         "--instance", "-i",
         type=str,
-        help="Path to a single .txt instance file.",
+        help="Path to a single .txt or .in instance file.",
     )
     input_group.add_argument(
         "--fold", "-f",
         type=str,
-        help="Path to a data fold directory (runs all .txt files inside).",
+        help="Path to a data fold directory (runs all .txt/.in files inside).",
     )
 
     # ── Algorithm selection ──────────────────────────────────────────────
     parser.add_argument(
         "--algorithm", "-a",
         type=str,
-        choices=["ga", "tabu", "alns", "all"],
+        choices=["ga", "tabu", "alns", "ortools", "all"],
         default="all",
-        help="Algorithm to run (default: all).",
+        help="Algorithm to run (default: all; optional OR-Tools only when selected).",
     )
 
     # ── Execution parameters ─────────────────────────────────────────────

@@ -1,0 +1,14 @@
+{
+  "K": 12,
+  "M": 5,
+  "N": 80,
+  "Q_max": 200,
+  "Q_min": 44,
+  "capacity_profile": "heterogeneous",
+  "format": "official_matrix",
+  "node_count": 171,
+  "profile": "line",
+  "q_max": 88,
+  "q_min": 29,
+  "seed": 2039
+}

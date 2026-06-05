@@ -1,0 +1,14 @@
+{
+  "K": 2,
+  "M": 5,
+  "N": 5,
+  "Q_max": 134,
+  "Q_min": 103,
+  "capacity_profile": "balanced",
+  "format": "official_matrix",
+  "node_count": 21,
+  "profile": "random",
+  "q_max": 98,
+  "q_min": 13,
+  "seed": 2027
+}
