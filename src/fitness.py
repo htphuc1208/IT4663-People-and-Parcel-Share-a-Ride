@@ -29,6 +29,9 @@ from typing import Dict, List, Set, Tuple
 
 from .encoding_and_read import ProblemData, Solution1D
 
+# ── Violation message type ───────────────────────────────────────────────────
+ViolationList = List[str]
+
 
 PENALTY_CAPACITY: float = 1_000.0
 PENALTY_PRECEDENCE: float = 10_000.0
@@ -129,33 +132,44 @@ def _evaluate_violations(
 
 def evaluate(solution: Solution1D) -> float:
     """
-    Min-Max fitness: max over K routes of (route_distance + route_penalty).
+    Min-Max fitness:  max_k(distance[k])  +  sum_k(penalty[k])
     Lower is better.
+
+    Separating max-distance from total-penalty ensures that violations on
+    non-bottleneck routes are always visible in the objective, not hidden
+    behind the longest route.  When the solution is fully feasible every
+    penalty term is zero and the value equals the pure min-max distance.
     """
     prob: ProblemData = solution.problem
     routes: List[List[int]] = decode_routes(solution)
-    demand_by_pickup, pickup_by_dropoff = _build_parcel_tables(prob)
+    demand_by_pickup, pickup_by_dropoff = prob.demand_by_pickup, prob.pickup_by_dropoff
 
-    route_costs: List[float] = []
+    max_dist: float = 0.0
+    total_penalty: float = 0.0
     for k, route in enumerate(routes):
         d: float = _route_distance(route, prob)
         p: float = _evaluate_violations(
             route, prob.vehicle_capacities[k], demand_by_pickup, pickup_by_dropoff
         )
-        route_costs.append(d + p)
+        if d > max_dist:
+            max_dist = d
+        total_penalty += p
 
-    return max(route_costs) if route_costs else 0.0
+    return max_dist + total_penalty
 
 
 def evaluate_detailed(
     solution: Solution1D,
 ) -> Tuple[float, List[float], List[float], List[float]]:
     """
-    Like evaluate(), but returns (fitness, distances, penalties, total_costs).
+    Like evaluate(), returns (fitness, distances, penalties, total_costs).
+
+    fitness = max(distances) + sum(penalties)  — consistent with evaluate().
+    total_costs[k] = distances[k] + penalties[k]  — per-vehicle breakdown.
     """
     prob: ProblemData = solution.problem
     routes: List[List[int]] = decode_routes(solution)
-    demand_by_pickup, pickup_by_dropoff = _build_parcel_tables(prob)
+    demand_by_pickup, pickup_by_dropoff = prob.demand_by_pickup, prob.pickup_by_dropoff
 
     distances: List[float] = []
     penalties: List[float] = []
@@ -170,5 +184,5 @@ def evaluate_detailed(
         penalties.append(p)
         total_costs.append(d + p)
 
-    fitness: float = max(total_costs) if total_costs else 0.0
+    fitness: float = (max(distances) + sum(penalties)) if distances else 0.0
     return fitness, distances, penalties, total_costs

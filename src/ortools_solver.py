@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from typing import Any, List, Tuple
 
 from .encoding_and_read import ProblemData, Solution1D
-from .fitness import evaluate
+from .fitness import evaluate, decode_routes as _decode_routes
+from .init import minmax_greedy_init
 
 
 @dataclass
@@ -22,7 +23,7 @@ class ORToolsConfig:
     """Configuration for the optional OR-Tools routing solver."""
 
     time_limit_seconds: float = 30.0
-    first_solution_strategy: str = "PATH_CHEAPEST_ARC"
+    first_solution_strategy: str = "PARALLEL_CHEAPEST_INSERTION"
     local_search_metaheuristic: str = "GUIDED_LOCAL_SEARCH"
 
 
@@ -83,7 +84,7 @@ def run_ortools(
     routing.AddDimensionWithVehicleCapacity(
         demand_callback_index,
         0,
-        [problem.capacity_for_vehicle(vehicle) for vehicle in range(problem.K)],
+        [problem.vehicle_capacities[vehicle] for vehicle in range(problem.K)],
         True,
         "ParcelCapacity",
     )
@@ -109,6 +110,17 @@ def run_ortools(
             <= distance_dimension.CumulVar(dropoff_index)
         )
 
+        # Exclude vehicles whose total capacity is less than this parcel's demand.
+        # routing.SetAllowedVehiclesForIndex() is the proper routing-model API for
+        # restricting which vehicles can visit a node; using VehicleVar.SetValues()
+        # on the underlying CP IntVar is unreliable across OR-Tools versions.
+        parcel_demand = problem.parcels[parcel_id - 1].demand
+        eligible = [v for v in range(problem.K)
+                    if problem.vehicle_capacities[v] >= parcel_demand]
+        if len(eligible) < problem.K:
+            for node_idx in (pickup_index, dropoff_index):
+                routing.VehicleVar(node_idx).SetValues(eligible)
+
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
     search_parameters.first_solution_strategy = _enum_value(
         routing_enums_pb2.FirstSolutionStrategy,
@@ -122,7 +134,9 @@ def run_ortools(
     )
     search_parameters.time_limit.FromSeconds(_time_limit_seconds(config.time_limit_seconds))
 
-    assignment = routing.SolveWithParameters(search_parameters)
+    # Try to inject a heuristic initial solution so OR-Tools skips construction
+    # and goes straight to local search — critical for tight-capacity instances.
+    assignment = _try_inject_hint(problem, routing, manager, search_parameters)
     if assignment is None:
         raise RuntimeError("OR-Tools did not find a feasible routing solution")
 
@@ -198,6 +212,39 @@ def _routes_to_solution(problem: ProblemData, routes: List[List[int]]) -> Soluti
     if not is_valid:
         raise RuntimeError(f"OR-Tools produced an invalid chromosome: {message}")
     return solution
+
+
+def _try_inject_hint(
+    problem: ProblemData,
+    routing: Any,
+    manager: Any,
+    search_parameters: Any,
+) -> Any:
+    """
+    Build an initial solution from minmax_greedy_init, inject it into the
+    routing model via ReadAssignmentFromRoutes, then call
+    SolveFromAssignmentWithParameters so OR-Tools skips the construction
+    phase and goes straight to local search.
+
+    Falls back to the plain SolveWithParameters if the hint is rejected
+    (e.g. infeasible w.r.t. model constraints).
+    """
+    try:
+        hint_sol = minmax_greedy_init(problem)
+        decoded = _decode_routes(hint_sol)  # list of [0, n1, n2, ..., 0]
+        # Convert node IDs to routing indices; drop depot (node 0) from ends
+        hint_routes = [
+            [manager.NodeToIndex(n) for n in route[1:-1]]
+            for route in decoded
+        ]
+        initial_assignment = routing.ReadAssignmentFromRoutes(hint_routes, True)
+        if initial_assignment is not None:
+            return routing.SolveFromAssignmentWithParameters(
+                initial_assignment, search_parameters
+            )
+    except Exception:
+        pass
+    return routing.SolveWithParameters(search_parameters)
 
 
 def _enum_value(enum_container: Any, name: str, field_name: str) -> int:

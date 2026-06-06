@@ -8,51 +8,44 @@ governed by an **adaptive roulette-wheel** mechanism that rewards operators
 producing improvements.
 
 ═══════════════════════════════════════════════════════════════════════════
-CRITICAL: 1D ENCODING MANIPULATION RULES
+DESIGN NOTES (revised) — REQUEST-LEVEL, MIN-MAX-AWARE OPERATORS
 ═══════════════════════════════════════════════════════════════════════════
-All destroy and repair operators MUST obey these rules:
+Unlike a textbook total-distance VRP, this problem has three peculiarities
+that the operators below are built around:
 
-  1. NEVER duplicate or remove `0` separators.
-     • The chromosome always contains exactly (K − 1) zeros.
-     • A destroy operator REMOVES some non-zero genes but NEVER touches the
-       zeros.  After destruction the chromosome is shorter, but every zero
-       separator is still present at the correct logical boundary.
-     • A repair operator REINSERTS the removed non-zero genes back into
-       valid non-zero positions without altering zeros.
+  1. MIN-MAX objective.  We minimise the LONGEST route, not the sum.  So
+     destroy/repair are scored by the resulting *maximum* route length, with
+     a bias toward off-loading work onto the currently shortest routes.
 
-  2. Destroy: extract a subset of non-zero genes → store them in a "removal pool".
-     • The chromosome temporarily shrinks by the number of removed genes.
-     • Zeros remain pinned: if consecutive zeros result from removal, that
-       simply means the corresponding vehicle route is now empty.
+  2. PASSENGER direct-trip.  A passenger gene `i` decodes to the pair
+     (pickup i → dropoff i+N+M).  All cost estimates expand the gene to its
+     two real nodes (prev→pickup→dropoff→next), never treat it as one node.
 
-  3. Repair: reinsert every gene from the removal pool into the chromosome.
-     • Insertion MUST happen at non-zero-adjacent positions (i.e., between
-       two non-zeros or between a zero and a non-zero).  Inserting at a
-       zero's index would shift a separator, which is FORBIDDEN.
-     • After repair the chromosome length is restored to N + 2M + (K − 1).
+  3. PARCEL coupling + capacity.  A parcel owns two genes (pickup, dropoff)
+     and a demand q.  Operators work on *requests* (logical units), so a
+     parcel's two genes are always removed together and re-inserted as a
+     precedence-safe, capacity-feasible pair.  This eliminates the 10 000 /
+     1 000 penalties at the source instead of paying them and repairing.
 
-  4. Preserve the set of non-zero node IDs.
-     • After a full destroy + repair cycle, the chromosome MUST contain
-       exactly the same set of non-zero integers as the original — no
-       duplicates, no omissions.
+WORKING REPRESENTATION
+----------------------
+Destroy/repair operate on `routes : List[List[int]]` — the K chromosome
+*segments* (non-zero genes only), obtained from `Solution1D.get_routes()`.
+After an operator runs, `_routes_to_chromosome` rejoins them with the K−1
+zero separators.  Zeros are therefore never touched explicitly: an empty
+route is simply an empty inner list.
 
-  5. ADAPTIVE ROULETTE-WHEEL SELECTION:
-     • Each destroy operator and each repair operator has a weight (score).
-     • At each iteration, operators are selected with probability proportional
-       to their weight (roulette wheel).
-     • After applying a (destroy, repair) pair, the resulting solution quality
-       determines a reward:
-         — σ₁ if a new global best is found.
-         — σ₂ if the solution improves on the current solution.
-         — σ₃ if the solution is accepted (even if worse — via Simulated
-           Annealing acceptance criterion).
-         — 0  if the solution is rejected.
-     • Weights are updated at the end of each segment (batch of iterations):
-         w_new = (1 − r) · w_old  +  r · (π / θ)
-       where π is the accumulated score, θ is the number of times the
-       operator was used, and r is the reaction factor (learning rate).
-     • This makes the algorithm SELF-TUNING: effective operators are used
-       more often; poor operators are gradually phased out.
+  • Destroy:  routes  -> (routes', removed: List[Request])
+  • Repair :  routes', removed -> routes''   (all removed requests re-inserted)
+
+ADAPTIVE ROULETTE-WHEEL SELECTION (unchanged in spirit)
+-------------------------------------------------------
+Each operator has a weight; selection is fitness-proportionate.  After a
+(destroy, repair) pair we award a reward (σ₁ best / σ₂ improve / σ₃ accepted
+/ 0 reject) and, at each segment boundary, blend it into the weight:
+      w_new = (1 − r) · w_old + r · (π / θ).
+Rewards are kept on the SAME numeric scale as the initial weights (≈1) so the
+roulette wheel stays balanced from the first segment.
 ═══════════════════════════════════════════════════════════════════════════
 """
 
@@ -62,12 +55,12 @@ import logging
 import math
 import random
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Tuple
 
 from .encoding_and_read import ProblemData, Request, RequestType, Solution1D
 from .fitness import evaluate
-from .init import greedy_init
+from .init import greedy_init, minmax_greedy_init, savings_init
 
 logger = logging.getLogger(__name__)
 
@@ -82,336 +75,562 @@ class ALNSConfig:
     max_iterations: int = 2000
     segment_length: int = 100       # iterations per weight-update segment
 
-    # Destruction degree: fraction of non-zero genes to remove
+    # Destruction degree: fraction of REQUESTS (N+M) to remove
     destroy_fraction_min: float = 0.10
     destroy_fraction_max: float = 0.40
 
     # ── Adaptive weight parameters ───────────────────────────────────────
+    # Rewards are normalised to ~[0, 1] so they share the scale of the
+    # uniformly-initialised weights (1.0) — keeps the roulette wheel balanced.
     reaction_factor: float = 0.15   # r : learning rate for weight update
-    sigma_1: float = 33.0           # reward: new global best
-    sigma_2: float = 9.0            # reward: improves current
-    sigma_3: float = 3.0            # reward: accepted (worse but accepted)
+    sigma_1: float = 1.00           # reward: new global best
+    sigma_2: float = 0.40           # reward: improves current
+    sigma_3: float = 0.15           # reward: accepted (worse but accepted)
+    weight_min: float = 0.05        # floor so no operator is ever starved
 
     # ── Simulated Annealing acceptance ───────────────────────────────────
     sa_start_temperature: float = 100.0
     sa_cooling_rate: float = 0.9995
+
+    # ── Restart / re-heat ────────────────────────────────────────────────
+    # If no new global best for this many segments, snap `current` back to the
+    # best solution and re-heat the temperature to intensify around the best.
+    restart_segments: int = 15
+    reheat_factor: float = 0.5      # T <- max(T, reheat_factor * T0) on restart
 
     seed: int | None = None
     time_limit_seconds: float = float("inf")
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                      HELPER: CHROMOSOME SURGERY                          ║
+# ║                 LOW-LEVEL ROUTE / GENE GEOMETRY HELPERS                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def _non_zero_positions(chromosome: List[int]) -> List[int]:
-    """Return indices of all non-zero genes."""
-    return [i for i, g in enumerate(chromosome) if g != 0]
+def _gene_head(gene: int) -> int:
+    """First decoded node when entering a gene (== the gene itself)."""
+    return gene
 
 
-def _remove_genes(
-    chromosome: List[int],
-    genes_to_remove: List[int],
-) -> List[int]:
+def _gene_tail(gene: int, N: int, M: int) -> int:
     """
-    Remove specific non-zero gene values from the chromosome.
+    Last decoded node when leaving a gene.
 
-    Zeros are NEVER removed.  The chromosome shrinks by len(genes_to_remove).
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero genes matching `genes_to_remove` are deleted.
-    • All zeros remain in place.
+    Passenger pickup `i` decodes to (i, i+N+M) → tail is the dropoff i+N+M.
+    Parcel pickup/dropoff genes decode to themselves → tail is the gene.
     """
-    removal_set: set = set(genes_to_remove)
-    # Use a counter for duplicate values (if any) — shouldn't happen, but safe
-    result: List[int] = []
-    for g in chromosome:
-        if g != 0 and g in removal_set:
-            removal_set.discard(g)
-            continue  # skip this gene (removed)
-        result.append(g)
-    return result
+    return gene + N + M if 1 <= gene <= N else gene
 
 
-def _insert_gene(
-    chromosome: List[int],
-    gene: int,
-    position: int,
-) -> List[int]:
-    """
-    Insert a gene at the given position.
+def _segment_distance(segment: List[int], prob: ProblemData) -> float:
+    """Full decoded distance of one route segment, depot → … → depot."""
+    N, M = prob.N, prob.M
+    prev: int = 0
+    total: float = 0.0
+    for g in segment:
+        if 1 <= g <= N:                      # passenger expands to pickup,dropoff
+            drop = g + N + M
+            total += prob.dist(prev, g) + prob.dist(g, drop)
+            prev = drop
+        else:
+            total += prob.dist(prev, g)
+            prev = g
+    total += prob.dist(prev, 0)
+    return total
 
-    ── 1D ENCODING SAFETY ──
-    • The caller must ensure `position` is a valid non-zero-adjacent index.
-    """
-    chrom: List[int] = list(chromosome)
-    chrom.insert(position, gene)
+
+def _routes_distances(routes: List[List[int]], prob: ProblemData) -> List[float]:
+    """Per-route decoded distance."""
+    return [_segment_distance(seg, prob) for seg in routes]
+
+
+def _routes_to_chromosome(routes: List[List[int]]) -> List[int]:
+    """Rejoin K segments with K−1 zero separators (empty route → '' between zeros)."""
+    chrom: List[int] = []
+    for i, seg in enumerate(routes):
+        if i > 0:
+            chrom.append(0)
+        chrom.extend(seg)
     return chrom
+
+
+def _top_two(dists: List[float]) -> Tuple[float, int, float]:
+    """Return (max value, its index, second-max value).  Used for O(1) max-excluding-k."""
+    max1v: float = -math.inf
+    max1i: int = -1
+    max2v: float = -math.inf
+    for i, d in enumerate(dists):
+        if d > max1v:
+            max2v, max1v, max1i = max1v, d, i
+        elif d > max2v:
+            max2v = d
+    return max1v, max1i, max2v
+
+
+def _request_gene_set(req: Request) -> set:
+    """Genes a request occupies in the chromosome (1 for passenger, 2 for parcel)."""
+    if req.request_type == RequestType.PARCEL:
+        return {req.pickup_node, req.dropoff_node}
+    return {req.pickup_node}
+
+
+def _segment_requests(segment: List[int], prob: ProblemData) -> List[Request]:
+    """Distinct requests appearing in a segment (a parcel counted once)."""
+    seen: set = set()
+    out: List[Request] = []
+    for g in segment:
+        req = prob.request_by_node[g]
+        key = (req.request_type, req.request_id)
+        if key not in seen:
+            seen.add(key)
+            out.append(req)
+    return out
+
+
+def _remove_requests(
+    routes: List[List[int]], reqs: List[Request], prob: ProblemData,
+) -> None:
+    """Strip every gene of every request in `reqs` from `routes` (in place)."""
+    genes: set = set()
+    for req in reqs:
+        genes |= _request_gene_set(req)
+    if not genes:
+        return
+    for k in range(len(routes)):
+        routes[k] = [g for g in routes[k] if g not in genes]
+
+
+def _request_savings(segment: List[int], prob: ProblemData) -> List[Tuple[float, Request]]:
+    """
+    For each request in a segment, the distance that would be saved by removing
+    it (sum of its genes' local removal deltas).  Passenger genes account for
+    the implicit dropoff; parcel genes are summed independently.
+    """
+    N, M, n = prob.N, prob.M, len(segment)
+    agg: dict = {}
+    for idx in range(n):
+        g = segment[idx]
+        prev = _gene_tail(segment[idx - 1], N, M) if idx > 0 else 0
+        nxt = _gene_head(segment[idx + 1]) if idx + 1 < n else 0
+        if 1 <= g <= N:
+            drop = g + N + M
+            sv = (prob.dist(prev, g) + prob.dist(g, drop)
+                  + prob.dist(drop, nxt) - prob.dist(prev, nxt))
+        else:
+            sv = prob.dist(prev, g) + prob.dist(g, nxt) - prob.dist(prev, nxt)
+        req = prob.request_by_node[g]
+        key = (req.request_type, req.request_id)
+        if key in agg:
+            agg[key] = (agg[key][0] + sv, req)
+        else:
+            agg[key] = (sv, req)
+    return list(agg.values())
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                        DESTROY OPERATORS                                 ║
+# ║   signature: (routes, problem, num_remove) -> (routes', removed reqs)    ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def destroy_random(
-    solution: Solution1D,
-    num_remove: int,
-) -> Tuple[List[int], List[int]]:
-    """
-    Random Removal: remove `num_remove` randomly chosen non-zero genes.
-
-    Returns (partial_chromosome, removed_genes).
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero positions are candidates.
-    • Zeros remain pinned.
-    """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
-
-    remove_count: int = min(num_remove, len(positions))
-    remove_positions: List[int] = sorted(
-        random.sample(positions, remove_count), reverse=True,
-    )
-
-    removed: List[int] = []
-    for pos in remove_positions:
-        removed.append(chrom.pop(pos))
-
-    removed.reverse()  # restore original order
-    return chrom, removed
+    routes: List[List[int]], prob: ProblemData, num_remove: int,
+) -> Tuple[List[List[int]], List[Request]]:
+    """Random Removal — remove `num_remove` randomly chosen *requests*."""
+    routes = [list(r) for r in routes]
+    all_reqs: List[Request] = [req for seg in routes for req in _segment_requests(seg, prob)]
+    k = min(num_remove, len(all_reqs))
+    if k == 0:
+        return routes, []
+    chosen = random.sample(all_reqs, k)
+    _remove_requests(routes, chosen, prob)
+    return routes, chosen
 
 
 def destroy_worst(
-    solution: Solution1D,
-    num_remove: int,
-) -> Tuple[List[int], List[int]]:
+    routes: List[List[int]], prob: ProblemData, num_remove: int, p: float = 4.0,
+) -> Tuple[List[List[int]], List[Request]]:
     """
-    Worst Removal: remove the non-zero genes whose removal most reduces cost.
-
-    Heuristic approximation: estimate each gene's "cost contribution" as the
-    distance from its predecessor to itself plus itself to its successor.
-    Remove the genes with the highest contribution.
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero genes are evaluated and removed.
-    • Zeros (separators) are untouched.
+    Worst Removal — remove the requests whose removal saves the most distance.
+    A randomisation exponent `p` (Shaw-style) avoids always picking the same
+    extreme genes: index = floor(len * U^p).
     """
-    chrom: List[int] = list(solution.chromosome)
-    prob: ProblemData = solution.problem
-    positions: List[int] = _non_zero_positions(chrom)
-    remove_count: int = min(num_remove, len(positions))
+    routes = [list(r) for r in routes]
+    scored: List[Tuple[float, Request]] = []
+    for seg in routes:
+        scored.extend(_request_savings(seg, prob))
+    if not scored:
+        return routes, []
+    scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Compute cost contribution of each non-zero gene
-    contributions: List[Tuple[float, int]] = []
-    for pos in positions:
-        node: int = chrom[pos]
+    k = min(num_remove, len(scored))
+    chosen: List[Request] = []
+    pool = scored
+    for _ in range(k):
+        idx = int(len(pool) * (random.random() ** p))
+        chosen.append(pool.pop(idx)[1])
+    _remove_requests(routes, chosen, prob)
+    return routes, chosen
 
-        # Find predecessor node (previous non-zero or depot 0)
-        prev_node: int = 0  # default to depot
-        for p in range(pos - 1, -1, -1):
-            prev_node = chrom[p]  # could be 0 (depot) — that's fine
-            break
 
-        # Find successor node (next non-zero or depot 0)
-        next_node: int = 0  # default to depot
-        for p in range(pos + 1, len(chrom)):
-            next_node = chrom[p]
-            break
-
-        # Cost contribution ≈ dist(prev, node) + dist(node, next) - dist(prev, next)
-        cost: float = (
-            prob.dist(prev_node, node)
-            + prob.dist(node, next_node)
-            - prob.dist(prev_node, next_node)
-        )
-        contributions.append((cost, pos))
-
-    # Sort by cost descending → remove highest cost first
-    contributions.sort(reverse=True)
-    remove_positions: List[int] = sorted(
-        [pos for _, pos in contributions[:remove_count]], reverse=True,
-    )
-
-    removed: List[int] = []
-    for pos in remove_positions:
-        removed.append(chrom.pop(pos))
-
-    removed.reverse()
-    return chrom, removed
+def _relatedness(a: Request, b: Request, prob: ProblemData) -> float:
+    """Shaw relatedness — lower means more related (closer to remove together)."""
+    d = prob.dist(a.pickup_node, b.pickup_node)
+    demand_diff = abs(a.demand - b.demand)
+    type_pen = 0.0 if a.request_type == b.request_type else 50.0
+    return d + 0.5 * demand_diff + type_pen
 
 
 def destroy_related(
-    solution: Solution1D,
-    num_remove: int,
-) -> Tuple[List[int], List[int]]:
+    routes: List[List[int]], prob: ProblemData, num_remove: int, p: float = 4.0,
+) -> Tuple[List[List[int]], List[Request]]:
+    """Shaw / Related Removal — grow a cluster of mutually-related requests."""
+    routes = [list(r) for r in routes]
+    all_reqs: List[Request] = [req for seg in routes for req in _segment_requests(seg, prob)]
+    target = min(num_remove, len(all_reqs))
+    if target == 0:
+        return routes, []
+
+    seed = random.choice(all_reqs)
+    chosen: List[Request] = [seed]
+    remaining = [r for r in all_reqs if r is not seed]
+
+    while len(chosen) < target and remaining:
+        ref = random.choice(chosen)
+        remaining.sort(key=lambda r: _relatedness(ref, r, prob))
+        idx = int(len(remaining) * (random.random() ** p))
+        chosen.append(remaining.pop(idx))
+
+    _remove_requests(routes, chosen, prob)
+    return routes, chosen
+
+
+def destroy_bottleneck(
+    routes: List[List[int]], prob: ProblemData, num_remove: int,
+) -> Tuple[List[List[int]], List[Request]]:
     """
-    Related Removal (Shaw): remove nodes that are geographically close to a
-    randomly chosen seed node.
-
-    ── 1D ENCODING SAFETY ──
-    • Selects a seed from non-zero genes, then picks its nearest neighbours.
-    • Only non-zero genes are removed; zeros stay.
+    Min-Max specific — peel the worst-contributing requests off the LONGEST
+    route(s) first, directly lowering the objective's ceiling.  Spills onto the
+    next-longest route if the bottleneck does not hold `num_remove` requests.
     """
-    chrom: List[int] = list(solution.chromosome)
-    prob: ProblemData = solution.problem
-    positions: List[int] = _non_zero_positions(chrom)
-    remove_count: int = min(num_remove, len(positions))
+    routes = [list(r) for r in routes]
+    dists = _routes_distances(routes, prob)
+    order = sorted(range(len(routes)), key=lambda k: dists[k], reverse=True)
 
-    if not positions:
-        return chrom, []
+    chosen: List[Request] = []
+    need = num_remove
+    for k in order:
+        if need <= 0:
+            break
+        ranked = _request_savings(routes[k], prob)
+        ranked.sort(key=lambda x: x[0], reverse=True)   # worst (most saving) first
+        for _, req in ranked:
+            if need <= 0:
+                break
+            chosen.append(req)
+            need -= 1
+    if not chosen:
+        return routes, []
+    _remove_requests(routes, chosen, prob)
+    return routes, chosen
 
-    # Choose a random seed
-    seed_pos: int = random.choice(positions)
-    seed_node: int = chrom[seed_pos]
 
-    # Compute distance from seed to every other non-zero gene
-    distances: List[Tuple[float, int]] = []
-    for pos in positions:
-        if pos == seed_pos:
+def destroy_route(
+    routes: List[List[int]], prob: ProblemData, num_remove: int,
+) -> Tuple[List[List[int]], List[Request]]:
+    """
+    Whole-route Removal — empty one taxi entirely and dump all its requests
+    into the pool.  Excellent for re-balancing a skewed Min-Max assignment.
+    Longer routes are preferred (weighted random).  `num_remove` is ignored.
+    """
+    routes = [list(r) for r in routes]
+    nonempty = [k for k in range(len(routes)) if routes[k]]
+    if not nonempty:
+        return routes, []
+    dists = _routes_distances(routes, prob)
+    k = random.choices(nonempty, weights=[dists[i] + 1.0 for i in nonempty])[0]
+    chosen = _segment_requests(routes[k], prob)
+    routes[k] = []
+    return routes, chosen
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                  INSERTION GEOMETRY (shared by repairs)                  ║
+# ║  A "move" encodes where a request goes:                                  ║
+# ║     ('P', gap)        passenger pickup at gene-gap `gap`                 ║
+# ║     ('C', i, j)       parcel pickup at gap i, dropoff at gap j  (i <= j) ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _best_in_route(
+    segment: List[int],
+    req: Request,
+    prob: ProblemData,
+    capacity: int,
+) -> Optional[Tuple[float, tuple]]:
+    """
+    Cheapest *feasible* insertion of `req` into a single segment.
+
+    Returns (delta_distance, move) or None if the request cannot be placed in
+    this route without violating capacity (only possible for parcels).
+
+    • Passenger: expands to pickup→dropoff; every gap is feasible.
+    • Parcel:    searches (i, j) gap pairs with i ≤ j so the pickup precedes the
+      dropoff; prunes positions where the running parcel load would exceed Q.
+    """
+    N, M = prob.N, prob.M
+    n = len(segment)
+
+    # Pre-compute the decoded boundary nodes around every gap once.
+    prevs = [(_gene_tail(segment[g - 1], N, M) if g > 0 else 0) for g in range(n + 1)]
+    nexts = [(_gene_head(segment[g]) if g < n else 0) for g in range(n + 1)]
+
+    if req.request_type == RequestType.PASSENGER:
+        pk = req.pickup_node
+        dr = pk + N + M
+        best: Optional[Tuple[float, tuple]] = None
+        for g in range(n + 1):
+            a, b = prevs[g], nexts[g]
+            delta = (prob.dist(a, pk) + prob.dist(pk, dr)
+                     + prob.dist(dr, b) - prob.dist(a, b))
+            if best is None or delta < best[0]:
+                best = (delta, ('P', g))
+        return best
+
+    # ── Parcel: coupled, capacity-feasible (i, j) search ─────────────────
+    pk, dr, q = req.pickup_node, req.dropoff_node, req.demand
+    if q > capacity:
+        return None
+
+    # Running parcel load right before each gap: load[p] = load after genes[:p].
+    load = [0] * (n + 1)
+    cur = 0
+    demand_by_pickup = prob.demand_by_pickup
+    pickup_by_dropoff = prob.pickup_by_dropoff
+    for idx in range(n):
+        g = segment[idx]
+        if g in demand_by_pickup:
+            cur += demand_by_pickup[g]
+        elif g in pickup_by_dropoff:
+            cur -= demand_by_pickup[pickup_by_dropoff[g]]
+        load[idx + 1] = cur
+
+    # Independent single-gap insertion deltas (valid & additive when i < j).
+    dp = [prob.dist(prevs[g], pk) + prob.dist(pk, nexts[g]) - prob.dist(prevs[g], nexts[g])
+          for g in range(n + 1)]
+    dd = [prob.dist(prevs[g], dr) + prob.dist(dr, nexts[g]) - prob.dist(prevs[g], nexts[g])
+          for g in range(n + 1)]
+
+    best = None
+    for i in range(n + 1):
+        if load[i] + q > capacity:          # carrying region starts here
             continue
-        node: int = chrom[pos]
-        d: float = prob.dist(seed_node, node)
-        distances.append((d, pos))
+        region_max = load[i]
+        for j in range(i, n + 1):
+            region_max = max(region_max, load[j])
+            if region_max + q > capacity:   # load only grows with j → stop
+                break
+            if i == j:                      # pickup & dropoff adjacent: one gap
+                a, b = prevs[i], nexts[i]
+                delta = (prob.dist(a, pk) + prob.dist(pk, dr)
+                         + prob.dist(dr, b) - prob.dist(a, b))
+            else:                           # two disjoint gaps → additive
+                delta = dp[i] + dd[j]
+            if best is None or delta < best[0]:
+                best = (delta, ('C', i, j))
+    return best
 
-    distances.sort()  # nearest first
-    remove_positions: List[int] = sorted(
-        [seed_pos] + [pos for _, pos in distances[: remove_count - 1]],
-        reverse=True,
-    )
 
-    removed: List[int] = []
-    for pos in remove_positions:
-        removed.append(chrom.pop(pos))
+def _force_insert_move(
+    segment: List[int], req: Request, prob: ProblemData,
+) -> Tuple[float, tuple]:
+    """
+    Last-resort insertion ignoring capacity (keeps every request present so the
+    chromosome stays complete).  Parcels go in adjacent (precedence still safe);
+    the penalty in `evaluate` will discourage such placements.
+    """
+    N, M = prob.N, prob.M
+    n = len(segment)
+    prevs = [(_gene_tail(segment[g - 1], N, M) if g > 0 else 0) for g in range(n + 1)]
+    nexts = [(_gene_head(segment[g]) if g < n else 0) for g in range(n + 1)]
 
-    removed.reverse()
-    return chrom, removed
+    if req.request_type == RequestType.PASSENGER:
+        pk, dr = req.pickup_node, req.pickup_node + N + M
+    else:
+        pk, dr = req.pickup_node, req.dropoff_node
+
+    best: Optional[Tuple[float, tuple]] = None
+    for g in range(n + 1):
+        a, b = prevs[g], nexts[g]
+        delta = prob.dist(a, pk) + prob.dist(pk, dr) + prob.dist(dr, b) - prob.dist(a, b)
+        if best is None or delta < best[0]:
+            best = (delta, ('P', g) if req.request_type == RequestType.PASSENGER
+                    else ('C', g, g))
+    return best  # type: ignore[return-value]
+
+
+def _apply_move(segment: List[int], req: Request, move: tuple) -> None:
+    """Mutate `segment` to realise `move` (insert dropoff first to keep indices valid)."""
+    if move[0] == 'P':
+        segment.insert(move[1], req.pickup_node)
+    else:
+        _, i, j = move
+        segment.insert(j, req.dropoff_node)   # j >= i, so inserting it first
+        segment.insert(i, req.pickup_node)     # leaves index i untouched
+
+
+def _minmax_cost(dist_after_k: float, k: int, max1v: float, max1i: int, max2v: float) -> float:
+    """Resulting maximum route length if route k becomes `dist_after_k`."""
+    other_max = max2v if k == max1i else max1v
+    return dist_after_k if dist_after_k > other_max else other_max
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                         REPAIR OPERATORS                                 ║
+# ║   signature: (routes, removed reqs, problem) -> routes'                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
+def _insert_request_minmax(
+    routes: List[List[int]], dists: List[float], req: Request, prob: ProblemData,
+) -> None:
+    """
+    Greedily insert one request at the position minimising the resulting MAX
+    route length (tie-break: smallest distance delta).  Updates `dists`.
+    """
+    max1v, max1i, max2v = _top_two(dists)
+    best: Optional[Tuple[Tuple[float, float], int, float, tuple]] = None
+
+    for k in range(len(routes)):
+        res = _best_in_route(routes[k], req, prob, prob.vehicle_capacities[k])
+        if res is None:
+            continue
+        delta, move = res
+        cand_max = _minmax_cost(dists[k] + delta, k, max1v, max1i, max2v)
+        key = (cand_max, delta)
+        if best is None or key < best[0]:
+            best = (key, k, delta, move)
+
+    if best is None:   # no capacity-feasible route → forced placement
+        k = max(range(len(routes)), key=lambda i: prob.vehicle_capacities[i])
+        delta, move = _force_insert_move(routes[k], req, prob)
+        best = ((math.inf, delta), k, delta, move)
+
+    _, k, delta, move = best
+    _apply_move(routes[k], req, move)
+    dists[k] += delta
+
+
 def repair_greedy(
-    partial_chrom: List[int],
-    removed: List[int],
-    problem: ProblemData,
-) -> List[int]:
+    routes: List[List[int]], removed: List[Request], prob: ProblemData,
+) -> List[List[int]]:
     """
-    Greedy Repair: insert each removed gene at the position that causes the
-    smallest increase in total route distance.
-
-    ── 1D ENCODING SAFETY ──
-    • Genes are inserted ONE AT A TIME at valid positions.
-    • Valid positions: any index that is currently occupied by a non-zero gene,
-      or immediately after a zero (i.e., at the start of a route segment),
-      or at the end of the chromosome.
-    • Zeros are never moved.  Each insertion increases chromosome length by 1.
+    Min-Max Greedy Repair — re-insert requests one at a time, each at its
+    globally best (min resulting maximum) feasible position.  Parcels go in
+    coupled & capacity-checked; passengers expand to their direct trip.
     """
-    chrom: List[int] = list(partial_chrom)
-
-    for gene in removed:
-        best_cost: float = float("inf")
-        best_pos: int = 0
-
-        # Try every possible insertion position
-        for pos in range(len(chrom) + 1):
-            candidate: List[int] = list(chrom)
-            candidate.insert(pos, gene)
-
-            # Quick cost estimate: dist(prev, gene) + dist(gene, next)
-            prev_node: int = candidate[pos - 1] if pos > 0 else 0
-            next_node: int = candidate[pos + 1] if pos < len(candidate) - 1 else 0
-
-            insertion_cost: float = (
-                problem.dist(prev_node, gene)
-                + problem.dist(gene, next_node)
-                - (problem.dist(prev_node, next_node) if pos > 0 else 0.0)
-            )
-
-            if insertion_cost < best_cost:
-                best_cost = insertion_cost
-                best_pos = pos
-
-        chrom.insert(best_pos, gene)
-
-    return chrom
+    routes = [list(r) for r in routes]
+    dists = _routes_distances(routes, prob)
+    pool = list(removed)
+    random.shuffle(pool)
+    for req in pool:
+        _insert_request_minmax(routes, dists, req, prob)
+    return routes
 
 
 def repair_random(
-    partial_chrom: List[int],
-    removed: List[int],
-    problem: ProblemData,
-) -> List[int]:
+    routes: List[List[int]], removed: List[Request], prob: ProblemData,
+) -> List[List[int]]:
     """
-    Random Repair: insert each removed gene at a random valid position.
-
-    ── 1D ENCODING SAFETY ──
-    • Each gene is inserted at a random index in [0, len(chrom)].
-    • The chromosome grows by 1 per insertion.
-    • Zeros are never moved.
+    Random Repair — drop each request into a random route at a random gap.
+    Parcels are inserted ADJACENT (pickup immediately followed by dropoff) so
+    precedence is always respected even though the position is random.
     """
-    chrom: List[int] = list(partial_chrom)
-    random.shuffle(removed)
+    routes = [list(r) for r in routes]
+    pool = list(removed)
+    random.shuffle(pool)
+    for req in pool:
+        k = random.randrange(len(routes))
+        seg = routes[k]
+        if req.request_type == RequestType.PASSENGER:
+            seg.insert(random.randint(0, len(seg)), req.pickup_node)
+        else:
+            gap = random.randint(0, len(seg))
+            seg.insert(gap, req.dropoff_node)
+            seg.insert(gap, req.pickup_node)   # → [..., pickup, dropoff, ...]
+    return routes
 
-    for gene in removed:
-        # Any position is valid; zeros will naturally act as route boundaries
-        pos: int = random.randint(0, len(chrom))
-        chrom.insert(pos, gene)
 
-    return chrom
-
-
-def repair_regret2(
-    partial_chrom: List[int],
-    removed: List[int],
-    problem: ProblemData,
-) -> List[int]:
+def repair_regret(
+    routes: List[List[int]], removed: List[Request], prob: ProblemData, k_regret: int = 3,
+) -> List[List[int]]:
     """
-    Regret-2 Repair: prioritise inserting the gene whose cost difference
-    between its best and second-best insertion position is largest.
+    Min-Max Regret-k Repair — at each step insert the request we would most
+    "regret" leaving out: the one whose 2nd…kth best min-max costs exceed its
+    best by the largest margin.  Greedy ties are broken by lower best cost.
 
-    This prevents "easy" insertions from consuming good positions that are
-    critical for harder-to-place genes.
-
-    ── 1D ENCODING SAFETY ──
-    • Same insertion rules as greedy_repair: one gene at a time into valid positions.
+    Efficiency: the per-(request, route) insertion delta is cached and only the
+    single route changed by an insertion is recomputed, so a full fill is
+    O(pool · (pool + work_on_changed_route)) rather than O(pool² · L).
     """
-    chrom: List[int] = list(partial_chrom)
-    pool: List[int] = list(removed)
+    routes = [list(r) for r in routes]
+    dists = _routes_distances(routes, prob)
+    pool = list(removed)
+    nroutes = len(routes)
+
+    def key_of(r: Request) -> tuple:
+        return (r.request_type, r.request_id)
+
+    # cache[reqkey][k] = (delta, move) or None  (None = infeasible in route k)
+    cache: dict = {}
+    for req in pool:
+        cache[key_of(req)] = [
+            _best_in_route(routes[k], req, prob, prob.vehicle_capacities[k])
+            for k in range(nroutes)
+        ]
 
     while pool:
-        best_regret: float = -float("inf")
-        best_gene: int = pool[0]
-        best_gene_pos: int = 0
+        max1v, max1i, max2v = _top_two(dists)
+        best_req: Optional[Request] = None
+        best_score: Optional[tuple] = None
+        best_choice: Optional[tuple] = None     # (delta, k, move)
 
-        for gene in pool:
-            # Compute insertion cost at every position
-            costs: List[Tuple[float, int]] = []
-            for pos in range(len(chrom) + 1):
-                prev_node: int = chrom[pos - 1] if pos > 0 else 0
-                next_node: int = chrom[pos] if pos < len(chrom) else 0
-                cost: float = (
-                    problem.dist(prev_node, gene)
-                    + problem.dist(gene, next_node)
-                    - problem.dist(prev_node, next_node)
-                )
-                costs.append((cost, pos))
+        for req in pool:
+            entries = cache[key_of(req)]
+            costs: List[Tuple[float, float, int, tuple]] = []
+            for k, res in enumerate(entries):
+                if res is None:
+                    continue
+                delta, move = res
+                cand_max = _minmax_cost(dists[k] + delta, k, max1v, max1i, max2v)
+                costs.append((cand_max, delta, k, move))
 
-            costs.sort()
-            best_cost: float = costs[0][0]
-            second_cost: float = costs[1][0] if len(costs) > 1 else best_cost
-            regret: float = second_cost - best_cost
+            if not costs:   # infeasible everywhere → force into roomiest route
+                kk = max(range(nroutes), key=lambda i: prob.vehicle_capacities[i])
+                delta, move = _force_insert_move(routes[kk], req, prob)
+                costs = [(math.inf, delta, kk, move)]
 
-            if regret > best_regret:
-                best_regret = regret
-                best_gene = gene
-                best_gene_pos = costs[0][1]
+            costs.sort(key=lambda x: (x[0], x[1]))
+            best_cost = costs[0][0]
+            regret = sum(costs[t][0] - best_cost
+                         for t in range(1, min(k_regret, len(costs))))
+            # maximise regret; tie-break: prefer the cheaper best insertion
+            score = (regret, -best_cost)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_req = req
+                best_choice = (costs[0][1], costs[0][2], costs[0][3])
 
-        chrom.insert(best_gene_pos, best_gene)
-        pool.remove(best_gene)
+        assert best_req is not None and best_choice is not None
+        delta, k, move = best_choice
+        _apply_move(routes[k], best_req, move)
+        dists[k] += delta
+        pool.remove(best_req)
+        del cache[key_of(best_req)]
 
-    return chrom
+        # only route k changed → refresh that column of the cache
+        for req in pool:
+            cache[key_of(req)][k] = _best_in_route(
+                routes[k], req, prob, prob.vehicle_capacities[k]
+            )
+
+    return routes
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -426,39 +645,25 @@ class OperatorStats:
 
 
 def roulette_wheel_select(weights: List[float]) -> int:
-    """
-    Select an index via roulette-wheel (fitness-proportionate) selection.
-
-    Parameters
-    ----------
-    weights : List[float]
-        Non-negative weights for each candidate.
-
-    Returns
-    -------
-    int
-        Selected index.
-    """
+    """Fitness-proportionate selection of an index."""
     total: float = sum(weights)
     if total <= 0:
         return random.randrange(len(weights))
-
     r: float = random.uniform(0, total)
     cumulative: float = 0.0
     for i, w in enumerate(weights):
         cumulative += w
         if cumulative >= r:
             return i
-    return len(weights) - 1  # fallback
+    return len(weights) - 1
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                          ALNS MAIN LOOP                                  ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-# Type alias for destroy/repair callables
-DestroyOp = Callable[[Solution1D, int], Tuple[List[int], List[int]]]
-RepairOp = Callable[[List[int], List[int], ProblemData], List[int]]
+DestroyOp = Callable[[List[List[int]], ProblemData, int], Tuple[List[List[int]], List[Request]]]
+RepairOp = Callable[[List[List[int]], List[Request], ProblemData], List[List[int]]]
 
 
 def run_alns(
@@ -469,21 +674,7 @@ def run_alns(
     """
     Execute the ALNS algorithm.
 
-    Parameters
-    ----------
-    problem : ProblemData
-        Parsed SARP instance.
-    config : ALNSConfig | None
-        Hyper-parameters (uses defaults if None).
-    initial_solution : Solution1D | None
-        Starting point (greedy_init is used if None).
-
-    Returns
-    -------
-    (best_solution, best_fitness, history)
-        best_solution — the best Solution1D found.
-        best_fitness  — its Min-Max objective value.
-        history       — best fitness per iteration for plotting.
+    Returns (best_solution, best_fitness, history).
     """
     if config is None:
         config = ALNSConfig()
@@ -494,7 +685,19 @@ def run_alns(
 
     # ── Initial solution ─────────────────────────────────────────────────
     if initial_solution is None:
-        current: Solution1D = greedy_init(problem)
+        _seed0: int = config.seed if config.seed is not None else 0
+        _candidates: List[Solution1D] = [
+            greedy_init(problem),
+            greedy_init(problem, seed=_seed0),
+            minmax_greedy_init(problem),
+            savings_init(problem),
+        ]
+        _fits: List[float] = [evaluate(s) for s in _candidates]
+        _best_idx: int = _fits.index(min(_fits))
+        current: Solution1D = _candidates[_best_idx]
+        logger.info(
+            "ALNS init | 4 heuristics evaluated | best_init_fitness=%.4f", _fits[_best_idx]
+        )
     else:
         current = initial_solution.copy()
 
@@ -503,127 +706,122 @@ def run_alns(
     best_fitness: float = current_fitness
     history: List[float] = [best_fitness]
 
+    total_requests: int = problem.N + problem.M
+
     # ── Register operators ───────────────────────────────────────────────
     destroy_ops: List[DestroyOp] = [
         destroy_random,
         destroy_worst,
         destroy_related,
+        destroy_bottleneck,
+        destroy_route,
     ]
     repair_ops: List[RepairOp] = [
         repair_greedy,
         repair_random,
-        repair_regret2,
+        repair_regret,
     ]
-    destroy_names: List[str] = ["random", "worst", "related"]
-    repair_names: List[str] = ["greedy", "random", "regret-2"]
+    destroy_names: List[str] = ["random", "worst", "related", "bottleneck", "route"]
+    repair_names: List[str] = ["greedy", "random", "regret-3"]
 
-    # ── Adaptive weights (initialised uniformly) ─────────────────────────
     num_destroy: int = len(destroy_ops)
     num_repair: int = len(repair_ops)
     destroy_weights: List[float] = [1.0] * num_destroy
     repair_weights: List[float] = [1.0] * num_repair
 
-    # Per-segment statistics
     destroy_stats: List[OperatorStats] = [OperatorStats() for _ in range(num_destroy)]
     repair_stats: List[OperatorStats] = [OperatorStats() for _ in range(num_repair)]
 
-    # ── Simulated Annealing temperature ──────────────────────────────────
     temperature: float = config.sa_start_temperature
+    last_improve_iter: int = 0
+    restart_patience: int = config.restart_segments * config.segment_length
 
     logger.info(
-        "ALNS started | max_iter=%d | segment=%d | T0=%.2f",
-        config.max_iterations, config.segment_length, temperature,
+        "ALNS started | max_iter=%d | segment=%d | T0=%.2f | requests=%d | "
+        "destroy=%s | repair=%s",
+        config.max_iterations, config.segment_length, temperature, total_requests,
+        destroy_names, repair_names,
     )
 
     # ── Main loop ────────────────────────────────────────────────────────
     for iteration in range(1, config.max_iterations + 1):
-        elapsed: float = time.time() - start_time
-        if elapsed >= config.time_limit_seconds:
+        if time.time() - start_time >= config.time_limit_seconds:
             logger.info("ALNS time limit reached at iteration %d", iteration)
             break
 
-        # ── Determine destruction degree ─────────────────────────────────
-        non_zeros: int = len(_non_zero_positions(current.chromosome))
+        # Destruction degree (as a number of REQUESTS).
         num_remove: int = random.randint(
-            max(1, int(non_zeros * config.destroy_fraction_min)),
-            max(1, int(non_zeros * config.destroy_fraction_max)),
+            max(1, int(total_requests * config.destroy_fraction_min)),
+            max(1, int(total_requests * config.destroy_fraction_max)),
         )
 
-        # ── Select operators via roulette wheel ──────────────────────────
         d_idx: int = roulette_wheel_select(destroy_weights)
         r_idx: int = roulette_wheel_select(repair_weights)
 
-        # ── Destroy ──────────────────────────────────────────────────────
-        partial_chrom, removed = destroy_ops[d_idx](current, num_remove)
+        routes: List[List[int]] = current.get_routes()
+        partial_routes, removed = destroy_ops[d_idx](routes, problem, num_remove)
+        repaired_routes: List[List[int]] = repair_ops[r_idx](partial_routes, removed, problem)
 
-        # ── Repair ───────────────────────────────────────────────────────
-        repaired_chrom: List[int] = repair_ops[r_idx](
-            partial_chrom, removed, problem,
-        )
-
-        candidate = Solution1D(repaired_chrom, problem)
+        candidate = Solution1D(_routes_to_chromosome(repaired_routes), problem)
         candidate_fitness: float = evaluate(candidate)
 
-        # ── Acceptance decision & scoring ────────────────────────────────
+        # ── Acceptance & scoring ─────────────────────────────────────────
         reward: float = 0.0
-
         if candidate_fitness < best_fitness:
-            # New global best
             best_fitness = candidate_fitness
             best_solution = candidate.copy()
             current = candidate
             current_fitness = candidate_fitness
             reward = config.sigma_1
-
+            last_improve_iter = iteration
         elif candidate_fitness < current_fitness:
-            # Improves on current (but not global best)
             current = candidate
             current_fitness = candidate_fitness
             reward = config.sigma_2
-
         else:
-            # Worse solution — accept with SA probability
-            delta: float = candidate_fitness - current_fitness
-            if temperature > 1e-12 and random.random() < math.exp(-delta / temperature):
+            delta_f: float = candidate_fitness - current_fitness
+            if temperature > 1e-12 and random.random() < math.exp(-delta_f / temperature):
                 current = candidate
                 current_fitness = candidate_fitness
                 reward = config.sigma_3
-            # else: reject, reward stays 0
 
-        # ── Update operator statistics ───────────────────────────────────
         destroy_stats[d_idx].score += reward
         destroy_stats[d_idx].uses += 1
         repair_stats[r_idx].score += reward
         repair_stats[r_idx].uses += 1
 
         history.append(best_fitness)
-
-        # ── Cool down ────────────────────────────────────────────────────
         temperature *= config.sa_cooling_rate
 
-        # ── Segment boundary: update adaptive weights ────────────────────
+        # ── Segment boundary: weights + restart check ────────────────────
         if iteration % config.segment_length == 0:
             r: float = config.reaction_factor
-
             for i in range(num_destroy):
                 if destroy_stats[i].uses > 0:
-                    avg_score: float = destroy_stats[i].score / destroy_stats[i].uses
-                    destroy_weights[i] = (
-                        (1 - r) * destroy_weights[i] + r * avg_score
+                    avg = destroy_stats[i].score / destroy_stats[i].uses
+                    destroy_weights[i] = max(
+                        config.weight_min, (1 - r) * destroy_weights[i] + r * avg
                     )
-                # Reset segment stats
                 destroy_stats[i] = OperatorStats()
-
             for i in range(num_repair):
                 if repair_stats[i].uses > 0:
-                    avg_score = repair_stats[i].score / repair_stats[i].uses
-                    repair_weights[i] = (
-                        (1 - r) * repair_weights[i] + r * avg_score
+                    avg = repair_stats[i].score / repair_stats[i].uses
+                    repair_weights[i] = max(
+                        config.weight_min, (1 - r) * repair_weights[i] + r * avg
                     )
                 repair_stats[i] = OperatorStats()
 
+            # Restart: no global-best progress for restart_segments → intensify.
+            if iteration - last_improve_iter >= restart_patience:
+                current = best_solution.copy()
+                current_fitness = best_fitness
+                temperature = max(temperature, config.reheat_factor * config.sa_start_temperature)
+                last_improve_iter = iteration
+                logger.debug("Iter %d | restart to best | T re-heated to %.3f",
+                             iteration, temperature)
+
             logger.debug(
-                "Iter %d | weight update | destroy=%s | repair=%s",
+                "Iter %d | weights | destroy=%s | repair=%s",
                 iteration,
                 [f"{w:.2f}" for w in destroy_weights],
                 [f"{w:.2f}" for w in repair_weights],
@@ -631,8 +829,7 @@ def run_alns(
 
         if iteration % 200 == 0 or iteration == 1:
             logger.info(
-                "Iter %4d | best=%.4f | current=%.4f | T=%.4f | "
-                "d_wt=%s | r_wt=%s",
+                "Iter %4d | best=%.4f | current=%.4f | T=%.4f | d_wt=%s | r_wt=%s",
                 iteration, best_fitness, current_fitness, temperature,
                 [f"{w:.2f}" for w in destroy_weights],
                 [f"{w:.2f}" for w in repair_weights],

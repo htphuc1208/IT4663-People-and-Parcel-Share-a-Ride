@@ -1,47 +1,44 @@
 """
-ga.py — Genetic Algorithm for the Share-a-Ride Problem (Min-Max)
-================================================================
+ga.py — Memetic Genetic Algorithm for the Share-a-Ride Problem (Min-Max)
+========================================================================
 
-This module implements a Genetic Algorithm (GA) that operates EXCLUSIVELY
-on the unified 1D chromosome representation defined in `Solution1D`.
+This is a rewrite of the original permutation-GA. Empirical profiling of the
+old Order-Crossover GA showed it was destructive: 94-96% of children were worse
+than their best parent and 83-90% carried penalties (split parcels) even after
+repair. The crossover treated the multi-route chromosome as one flat TSP, so it
+never inherited good *vehicle clusters* — the actual building blocks of a
+min-max partitioning problem.
 
-═══════════════════════════════════════════════════════════════════════════
-CRITICAL: 1D ENCODING MANIPULATION RULES
-═══════════════════════════════════════════════════════════════════════════
-All genetic operators (crossover, mutation, repair) MUST obey these rules:
+This version fixes that with four changes:
 
-  1. NEVER duplicate or remove `0` separators.
-     • The chromosome always contains exactly (K − 1) zeros.
-     • Operators must treat zeros as immovable "walls" — they partition the
-       chromosome into K route segments.  Swapping, inserting, or deleting
-       a zero would change the number of vehicles, which is invalid.
+  1. REQUEST-LEVEL, ATOMIC-PARCEL REPRESENTATION
+     Operators work on `List[List[Request]]` — one ordered request list per
+     vehicle. A parcel is an atomic unit (pickup immediately followed by its
+     drop-off). Consequences:
+       • Parcels can never be split across routes  → no precedence penalty.
+       • At most one parcel is on board at a time   → capacity is satisfied as
+         long as each parcel sits on a vehicle with Q[k] ≥ demand (guaranteed
+         by every operator). So penalties are structurally zero and fitness
+         reduces to the pure min-max distance the problem actually asks for.
 
-  2. Operate ONLY on non-zero genes.
-     • Crossover and mutation should identify the positions of non-zero
-       entries, manipulate those entries (swap, relocate, reverse), and
-       then write them back into the chromosome at the non-zero positions,
-       leaving every zero in its original index.
+  2. ROUTE-AWARE CROSSOVER (improvement #1)
+     `_route_crossover` inherits whole routes from one parent, removes the
+     requests of one donor route taken from the other parent, then re-inserts
+     them by cheapest, min-max-aware insertion. Good vehicle clusters survive.
 
-  3. Preserve the set of non-zero node IDs.
-     • After any operator, the chromosome must contain EXACTLY the same
-       set of non-zero integers as before — no duplicates, no omissions.
-     • A repair step should verify and fix any violations.
+  3. BOTTLENECK-DIRECTED MUTATION (improvement #2)
+     `_mut_bottleneck` pulls a request off the longest route and re-inserts it
+     into the shortest feasible route — a move aimed straight at the min-max
+     objective. It sits alongside relocate / swap / inversion.
 
-  4. Parcel precedence is enforced by the penalty function (fitness.py),
-     NOT by the genetic operators.  This keeps operators simple and fast;
-     the penalty-driven fitness naturally steers the population toward
-     feasibility.
+  4. MEMETIC LOCAL SEARCH (improvement #3)
+     `_local_search` polishes a solution with inter-route relocate (off the
+     bottleneck) plus intra-route 2-opt on the bottleneck route.
 
-  5. ADAPTIVE MUTATION RATE:
-     • The mutation probability starts at an initial value (e.g. 0.15).
-     • If the population's best fitness stagnates for `stagnation_limit`
-       generations, the mutation rate is INCREASED (up to a cap) to inject
-       diversity.
-     • If improvement resumes, the mutation rate decays back toward the
-       baseline to allow fine-tuning.
-     • This feedback loop prevents premature convergence without requiring
-       manual tuning.
-═══════════════════════════════════════════════════════════════════════════
+  + CONVERGENCE & POPULATION MANAGEMENT (improvement #4)
+     Duplicate-free seeding biased toward greedy/min-max/savings variants,
+     smaller tournaments, and early stop on convergence instead of a fixed
+     generation count.
 """
 
 from __future__ import annotations
@@ -49,14 +46,17 @@ from __future__ import annotations
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
-from .encoding_and_read import ProblemData, Solution1D
+from .encoding_and_read import ProblemData, Request, RequestType, Solution1D
 from .fitness import evaluate
-from .init import greedy_init, random_init
+from .init import greedy_init, minmax_greedy_init, savings_init, random_init
 
 logger = logging.getLogger(__name__)
+
+# A working solution is K ordered request lists, one per vehicle.
+Routes = List[List[Request]]
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -65,240 +65,390 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class GAConfig:
-    """Configuration for the Genetic Algorithm."""
-    population_size: int = 50
-    max_generations: int = 500
-    elite_count: int = 2
-    tournament_size: int = 5
+    """Configuration for the memetic Genetic Algorithm."""
+    population_size: int = -1   # -1 = auto-scale ≈ max(40, min(200, N+M+20))
+    max_generations: int = 2000
+    max_no_improve: int = 250   # early stop after this many stagnant generations
+    elite_count: int = 4
+    tournament_size: int = 3    # lowered from 5 → less premature convergence
 
     # ── Adaptive mutation ────────────────────────────────────────────────
-    mutation_rate_init: float = 0.15
+    mutation_rate_init: float = 0.20
     mutation_rate_min: float = 0.05
-    mutation_rate_max: float = 0.60
-    mutation_rate_increase: float = 0.05  # bump when stagnating
-    mutation_rate_decay: float = 0.98     # decay when improving
-    stagnation_limit: int = 15            # generations without improvement
+    mutation_rate_max: float = 0.70
+    mutation_rate_increase: float = 0.05
+    mutation_rate_decay: float = 0.985
+    stagnation_limit: int = 25            # generations before a mutation bump
 
-    crossover_rate: float = 0.85
-    seed: int | None = None
+    crossover_rate: float = 0.90
+
+    # ── Memetic local search ─────────────────────────────────────────────
+    ls_rate: float = 0.20       # probability of polishing a child
+    ls_passes: int = 8          # local-search passes per call
+
+    seed: Optional[int] = None
     time_limit_seconds: float = float("inf")
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                       HELPER: EXTRACT / INJECT NON-ZEROS                ║
+# ║                 ROUTES ⇄ SOLUTION1D CONVERSION                           ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def _non_zero_positions(chromosome: List[int]) -> List[int]:
-    """Return the indices of all non-zero genes."""
-    return [i for i, g in enumerate(chromosome) if g != 0]
-
-
-def _extract_non_zeros(chromosome: List[int]) -> Tuple[List[int], List[int]]:
+def _solution_to_routes(solution: Solution1D) -> Routes:
     """
-    Split the chromosome into (non_zero_values, zero_skeleton).
-    `zero_skeleton` is a copy of the chromosome with non-zeros replaced by -1,
-    preserving the positions of all zeros.
+    Parse a chromosome into K request lists. Parcel drop-off nodes are skipped
+    (re-derived on assembly), collapsing every parcel to an atomic unit.
     """
-    positions: List[int] = _non_zero_positions(chromosome)
-    values: List[int] = [chromosome[i] for i in positions]
-    return values, positions
+    prob = solution.problem
+    by_pickup = {r.pickup_node: r for r in prob.passengers}
+    by_pickup.update({r.pickup_node: r for r in prob.parcels})
+
+    routes: Routes = [[]]
+    for gene in solution.chromosome:
+        if gene == 0:
+            routes.append([])
+        elif gene in by_pickup:        # pickup node → its request
+            routes[-1].append(by_pickup[gene])
+        # else: a drop-off node — implied, skip
+    return routes
 
 
-def _inject_non_zeros(
-    chromosome: List[int],
-    values: List[int],
-    positions: List[int],
-) -> List[int]:
-    """Write `values` back into `chromosome` at `positions`."""
-    new_chrom: List[int] = list(chromosome)
-    for pos, val in zip(positions, values):
-        new_chrom[pos] = val
-    return new_chrom
+def _routes_to_solution(routes: Routes, problem: ProblemData) -> Solution1D:
+    """Assemble K request lists back into a structurally-valid chromosome."""
+    chrom: List[int] = []
+    last = len(routes) - 1
+    for v, route in enumerate(routes):
+        for req in route:
+            chrom.append(req.pickup_node)
+            if req.request_type == RequestType.PARCEL:
+                chrom.append(req.dropoff_node)
+        if v < last:
+            chrom.append(0)
+    return Solution1D(chrom, problem)
+
+
+def _clone(routes: Routes) -> Routes:
+    """Deep-enough copy: Request is immutable, so copy the inner lists only."""
+    return [list(r) for r in routes]
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                     CROSSOVER: ORDER CROSSOVER (OX)                      ║
+# ║                 DISTANCE / FITNESS HELPERS                               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def order_crossover(
-    parent_a: Solution1D,
-    parent_b: Solution1D,
-) -> Tuple[Solution1D, Solution1D]:
+def _route_distance(route: List[Request], prob: ProblemData) -> float:
+    """depot → (pickup → dropoff)* → depot for one request list."""
+    total = 0.0
+    prev = 0
+    for req in route:
+        total += prob.dist(prev, req.pickup_node)
+        total += prob.dist(req.pickup_node, req.dropoff_node)
+        prev = req.dropoff_node
+    total += prob.dist(prev, 0)
+    return total
+
+
+def _route_dists(routes: Routes, prob: ProblemData) -> List[float]:
+    return [_route_distance(r, prob) for r in routes]
+
+
+def _minmax(routes: Routes, prob: ProblemData) -> float:
+    """Internal objective: the longest route distance (penalties are 0 here)."""
+    return max(_route_distance(r, prob) for r in routes)
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                 CAPACITY-FEASIBLE CHEAPEST INSERTION                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _feasible_vehicles(req: Request, prob: ProblemData) -> List[int]:
+    """Vehicles that can carry this request (Q ≥ demand for parcels)."""
+    if req.request_type == RequestType.PASSENGER:
+        return list(range(prob.K))
+    elig = [v for v in range(prob.K) if prob.vehicle_capacities[v] >= req.demand]
+    return elig if elig else list(range(prob.K))
+
+
+def _best_position(route: List[Request], req: Request, prob: ProblemData) -> Tuple[int, float]:
     """
-    Order Crossover (OX) that operates ONLY on the non-zero genes.
+    Cheapest insertion position of req into one route; returns (pos, delta).
 
-    ── HOW IT WORKS ON THE 1D ENCODING ──
-    1. Extract the ordered list of non-zero values from each parent.
-       (Zeros stay pinned — they are NOT part of the crossover.)
-    2. Apply classical OX on these two value sequences.
-    3. Inject the resulting child sequences back into the chromosome
-       template (which retains zeros at their original positions).
-
-    This guarantees:
-      • Exactly (K−1) zeros remain untouched.
-      • Every non-zero node ID appears exactly once in each child.
+    Uses the O(1)-per-position insertion delta instead of rebuilding the route:
+        delta = d(left, pu) + d(pu, do) + d(do, right) − d(left, right)
+    where (left, right) are the boundary nodes around the insertion point and
+    (pu, do) are the request's pickup/drop-off. O(n) overall — this is the hot
+    path for crossover and local search.
     """
-    prob: ProblemData = parent_a.problem
-    chrom_a: List[int] = parent_a.chromosome
-    chrom_b: List[int] = parent_b.chromosome
+    pu, do = req.pickup_node, req.dropoff_node
+    seg = prob.dist(pu, do)            # internal pickup→dropoff, always traversed
+    left = 0                            # depot before the first request
+    best_pos, best_delta = 0, float("inf")
+    n = len(route)
+    for pos in range(n + 1):
+        right = route[pos].pickup_node if pos < n else 0   # depot after the last
+        delta = prob.dist(left, pu) + seg + prob.dist(do, right) - prob.dist(left, right)
+        if delta < best_delta:
+            best_delta, best_pos = delta, pos
+        if pos < n:
+            left = route[pos].dropoff_node
+    return best_pos, best_delta
 
-    vals_a, positions = _extract_non_zeros(chrom_a)
-    vals_b, _         = _extract_non_zeros(chrom_b)
-    n: int = len(vals_a)
 
-    if n < 2:
-        return parent_a.copy(), parent_b.copy()
+def _insert_best(
+    routes: Routes,
+    req: Request,
+    prob: ProblemData,
+    avoid: Optional[int] = None,
+) -> None:
+    """
+    Insert req at the position that minimises the *resulting route length* over
+    all feasible vehicles. Minimising the resulting length (not just the delta)
+    naturally steers requests toward shorter routes — the min-max objective.
+    """
+    choices = [v for v in _feasible_vehicles(req, prob) if v != avoid]
+    if not choices:
+        choices = _feasible_vehicles(req, prob)
 
-    # Select two random cut points
-    cx1, cx2 = sorted(random.sample(range(n), 2))
+    best_v, best_pos, best_len = choices[0], 0, float("inf")
+    for v in choices:
+        base = _route_distance(routes[v], prob)
+        pos, delta = _best_position(routes[v], req, prob)
+        result_len = base + delta
+        if result_len < best_len:
+            best_v, best_pos, best_len = v, pos, result_len
+    routes[best_v].insert(best_pos, req)
 
-    # ── Build child 1 ────────────────────────────────────────────────────
-    child_vals_1: List[int] = [-1] * n
-    child_vals_1[cx1:cx2 + 1] = vals_a[cx1:cx2 + 1]
-    fill_order: List[int] = [v for v in vals_b if v not in child_vals_1[cx1:cx2 + 1]]
-    fill_idx: int = 0
-    for i in range(n):
-        if child_vals_1[i] == -1:
-            child_vals_1[i] = fill_order[fill_idx]
-            fill_idx += 1
 
-    # ── Build child 2 (symmetric) ────────────────────────────────────────
-    child_vals_2: List[int] = [-1] * n
-    child_vals_2[cx1:cx2 + 1] = vals_b[cx1:cx2 + 1]
-    fill_order = [v for v in vals_a if v not in child_vals_2[cx1:cx2 + 1]]
-    fill_idx = 0
-    for i in range(n):
-        if child_vals_2[i] == -1:
-            child_vals_2[i] = fill_order[fill_idx]
-            fill_idx += 1
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                 ROUTE-AWARE CROSSOVER (improvement #1)                    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
-    new_chrom_1: List[int] = _inject_non_zeros(chrom_a, child_vals_1, positions)
-    new_chrom_2: List[int] = _inject_non_zeros(chrom_b, child_vals_2, positions)
+def _route_crossover(parent_a: Routes, parent_b: Routes, prob: ProblemData) -> Routes:
+    """
+    Inherit parent A's routes, then re-cluster the requests of one donor route
+    taken from parent B via cheapest min-max-aware insertion. Whole good
+    vehicle-clusters survive intact — unlike the old flat Order-Crossover.
+    """
+    child = _clone(parent_a)
 
-    return (
-        Solution1D(new_chrom_1, prob),
-        Solution1D(new_chrom_2, prob),
-    )
+    donor_candidates = [r for r in parent_b if r]
+    if not donor_candidates:
+        return child
+    donor = random.choice(donor_candidates)
+    donor_ids = {req.pickup_node for req in donor}
+
+    # Remove donor requests from the child, remembering them.
+    removed: List[Request] = []
+    for v in range(len(child)):
+        kept = []
+        for req in child[v]:
+            if req.pickup_node in donor_ids:
+                removed.append(req)
+            else:
+                kept.append(req)
+        child[v] = kept
+
+    # Re-insert (shuffled so insertion order varies between calls).
+    random.shuffle(removed)
+    for req in removed:
+        _insert_best(child, req, prob)
+    return child
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                          MUTATION OPERATORS                              ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def swap_mutation(solution: Solution1D) -> Solution1D:
+def _mut_relocate(routes: Routes, prob: ProblemData) -> Routes:
+    """Move one random request to its cheapest feasible position elsewhere."""
+    out = _clone(routes)
+    nonempty = [v for v in range(len(out)) if out[v]]
+    if not nonempty:
+        return out
+    v = random.choice(nonempty)
+    req = out[v].pop(random.randrange(len(out[v])))
+    _insert_best(out, req, prob)
+    return out
+
+
+def _mut_swap(routes: Routes, prob: ProblemData) -> Routes:
+    """Swap two requests between two routes, respecting parcel capacity."""
+    out = _clone(routes)
+    nonempty = [v for v in range(len(out)) if out[v]]
+    if len(nonempty) < 2:
+        return out
+    va, vb = random.sample(nonempty, 2)
+    ia, ib = random.randrange(len(out[va])), random.randrange(len(out[vb]))
+    ra, rb = out[va][ia], out[vb][ib]
+
+    # Capacity guard keeps the atomic-parcel feasibility invariant.
+    if ra.request_type == RequestType.PARCEL and prob.vehicle_capacities[vb] < ra.demand:
+        return out
+    if rb.request_type == RequestType.PARCEL and prob.vehicle_capacities[va] < rb.demand:
+        return out
+
+    out[va][ia], out[vb][ib] = rb, ra
+    return out
+
+
+def _mut_inversion(routes: Routes, prob: ProblemData) -> Routes:
+    """Reverse a sub-segment within one route (always feasible)."""
+    out = _clone(routes)
+    candidates = [v for v in range(len(out)) if len(out[v]) >= 2]
+    if not candidates:
+        return out
+    v = random.choice(candidates)
+    i, j = sorted(random.sample(range(len(out[v])), 2))
+    out[v][i:j + 1] = reversed(out[v][i:j + 1])
+    return out
+
+
+def _mut_bottleneck(routes: Routes, prob: ProblemData) -> Routes:
     """
-    Swap two randomly chosen non-zero genes.
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero positions are candidates for swapping.
-    • Zeros (separators) are never moved.
-    • The set of non-zero IDs is preserved.
+    Min-max-directed: take a request off the longest route and re-insert it into
+    the best *other* feasible (shortest) route. Directly attacks the objective.
     """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
-    if len(positions) < 2:
-        return solution.copy()
+    out = _clone(routes)
+    dists = _route_dists(out, prob)
+    bidx = max(range(len(out)), key=lambda i: dists[i])
+    if not out[bidx]:
+        return _mut_relocate(routes, prob)
+    req = out[bidx].pop(random.randrange(len(out[bidx])))
+    _insert_best(out, req, prob, avoid=bidx)
+    return out
 
-    i, j = random.sample(positions, 2)
-    chrom[i], chrom[j] = chrom[j], chrom[i]
-    return Solution1D(chrom, solution.problem)
+
+_MUTATORS: List[Callable[[Routes, ProblemData], Routes]] = [
+    _mut_relocate, _mut_swap, _mut_inversion, _mut_bottleneck,
+]
+_MUT_WEIGHTS = [0.25, 0.20, 0.20, 0.35]   # bias toward the bottleneck operator
 
 
-def inversion_mutation(solution: Solution1D) -> Solution1D:
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                 MEMETIC LOCAL SEARCH (improvement #3)                     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _two_opt_once(route: List[Request], prob: ProblemData) -> List[Request]:
+    """Return the best single 2-opt segment reversal of one route."""
+    n = len(route)
+    if n < 3:
+        return route
+    best_route, best_d = route, _route_distance(route, prob)
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            cand = route[:i] + route[i:j + 1][::-1] + route[j + 1:]
+            d = _route_distance(cand, prob)
+            if d < best_d - 1e-9:
+                best_d, best_route = d, cand
+    return best_route
+
+
+def _local_search(routes: Routes, prob: ProblemData, max_pass: int) -> Routes:
     """
-    Reverse a sub-segment of non-zero genes within one route segment.
-
-    ── 1D ENCODING SAFETY ──
-    • Picks a random route segment (between two consecutive zeros / edges).
-    • Reverses the non-zero portion of that segment in-place.
-    • Zeros are untouched; no node IDs are added or removed.
+    Polish a solution: relocate requests off the bottleneck route when that
+    lowers the global max, then 2-opt the bottleneck route. Repeat until no
+    improvement or max_pass reached.
     """
-    chrom: List[int] = list(solution.chromosome)
-    routes: List[List[int]] = solution.get_routes()
+    out = _clone(routes)
+    for _ in range(max_pass):
+        dists = _route_dists(out, prob)
+        bidx = max(range(len(out)), key=lambda i: dists[i])
+        cur_max = dists[bidx]
+        improved = False
 
-    # Pick a non-empty route to reverse a sub-segment
-    non_empty_indices: List[int] = [
-        k for k, r in enumerate(routes) if len(r) >= 2
-    ]
-    if not non_empty_indices:
-        return solution.copy()
+        # (a) inter-route relocate off the bottleneck
+        broute = out[bidx]
+        for i in range(len(broute)):
+            req = broute[i]
+            remainder = broute[:i] + broute[i + 1:]
+            rem_len = _route_distance(remainder, prob)
+            if rem_len >= cur_max:
+                continue  # removing this request alone can't lower the max
+            best = None
+            for v in _feasible_vehicles(req, prob):
+                if v == bidx:
+                    continue
+                base = _route_distance(out[v], prob)
+                pos, delta = _best_position(out[v], req, prob)
+                new_len = base + delta
+                if new_len < cur_max and (best is None or new_len < best[2]):
+                    best = (v, pos, new_len)
+            if best is not None and max(rem_len, best[2]) < cur_max - 1e-9:
+                v, pos, _ = best
+                out[bidx] = remainder
+                out[v].insert(pos, req)
+                improved = True
+                break
 
-    route_idx: int = random.choice(non_empty_indices)
+        if improved:
+            continue
 
-    # Locate the start position of this route in the chromosome
-    pos: int = 0
-    for k in range(route_idx):
-        pos += len(routes[k]) + 1  # +1 for the zero separator
+        # (b) intra-route 2-opt on the bottleneck
+        polished = _two_opt_once(out[bidx], prob)
+        if _route_distance(polished, prob) < cur_max - 1e-9:
+            out[bidx] = polished
+            improved = True
 
-    route: List[int] = routes[route_idx]
-    if len(route) < 2:
-        return solution.copy()
-
-    i, j = sorted(random.sample(range(len(route)), 2))
-    route[i:j + 1] = reversed(route[i:j + 1])
-
-    # Write back
-    for offset, node in enumerate(route):
-        chrom[pos + offset] = node
-
-    return Solution1D(chrom, solution.problem)
-
-
-def relocate_mutation(solution: Solution1D) -> Solution1D:
-    """
-    Remove a random non-zero gene and reinsert it at a random non-zero position.
-
-    ── 1D ENCODING SAFETY ──
-    • Only non-zero genes are candidates.
-    • The gene is removed from its current position and inserted elsewhere.
-    • The zero separators stay pinned; this effectively moves a node from
-      one vehicle's route segment to another (or within the same route).
-    • The set of non-zero node IDs is preserved (no duplicates, no loss).
-    """
-    chrom: List[int] = list(solution.chromosome)
-    positions: List[int] = _non_zero_positions(chrom)
-    if len(positions) < 2:
-        return solution.copy()
-
-    # Pick a random non-zero to remove
-    src: int = random.choice(positions)
-    gene: int = chrom.pop(src)
-
-    # Recompute non-zero positions after removal, then pick insertion point
-    # We insert BEFORE a non-zero position or at the end of the chromosome
-    # but we must avoid inserting at a zero's position
-    possible_inserts: List[int] = [
-        i for i, g in enumerate(chrom) if g != 0
-    ]
-    # Also allow inserting at the very end if the last element is not 0
-    if chrom and chrom[-1] != 0:
-        possible_inserts.append(len(chrom))
-    elif not chrom:
-        possible_inserts.append(0)
-
-    if not possible_inserts:
-        # Fallback: insert before first separator or at start
-        chrom.insert(0, gene)
-    else:
-        dst: int = random.choice(possible_inserts)
-        chrom.insert(dst, gene)
-
-    return Solution1D(chrom, solution.problem)
+        if not improved:
+            break
+    return out
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║                       SELECTION: TOURNAMENT                              ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def tournament_selection(
-    population: List[Solution1D],
-    fitnesses: List[float],
-    tournament_size: int,
-) -> Solution1D:
-    """Select the best individual from a random tournament of given size."""
-    indices: List[int] = random.sample(range(len(population)), tournament_size)
-    best_idx: int = min(indices, key=lambda i: fitnesses[i])
-    return population[best_idx].copy()
+def _tournament(population: List[Routes], fitnesses: List[float], k: int) -> Routes:
+    size = min(k, len(population))
+    idx = random.sample(range(len(population)), size)
+    best = min(idx, key=lambda i: fitnesses[i])
+    return _clone(population[best])
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                 POPULATION SEEDING (improvement #4)                       ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _seed_population(problem: ProblemData, pop_size: int, base_seed: int) -> List[Routes]:
+    """
+    Build a duplicate-free population biased toward structured constructions
+    (greedy / min-max / savings variants), padded with random solutions.
+    """
+    population: List[Routes] = []
+    seen: set = set()
+
+    def add(sol: Solution1D) -> None:
+        routes = _solution_to_routes(sol)
+        key = tuple(_routes_to_solution(routes, problem).chromosome)
+        if key not in seen:
+            seen.add(key)
+            population.append(routes)
+
+    # Deterministic structured seeds first.
+    add(greedy_init(problem))
+    add(minmax_greedy_init(problem))
+    add(savings_init(problem))
+
+    # ~70% structured (perturbed) variants.
+    structured_target = max(6, int(pop_size * 0.70))
+    s = base_seed
+    while len(population) < structured_target and s < base_seed + pop_size * 4:
+        add(greedy_init(problem, seed=s))
+        add(minmax_greedy_init(problem, seed=s))
+        add(savings_init(problem, seed=s))
+        s += 1
+
+    # Remainder: random diversity.
+    tries = 0
+    while len(population) < pop_size and tries < pop_size * 5:
+        add(random_init(problem, seed=base_seed + 1000 + tries))
+        tries += 1
+
+    # Hard pad if duplicates blocked us from reaching pop_size.
+    while len(population) < pop_size:
+        population.append(_solution_to_routes(random_init(problem)))
+
+    return population[:pop_size]
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -310,142 +460,123 @@ def run_ga(
     config: GAConfig | None = None,
 ) -> Tuple[Solution1D, float, List[float]]:
     """
-    Execute the full Genetic Algorithm.
-
-    Parameters
-    ----------
-    problem : ProblemData
-        Parsed SARP instance.
-    config : GAConfig | None
-        Algorithm hyper-parameters (uses defaults if None).
+    Execute the memetic GA.
 
     Returns
     -------
     (best_solution, best_fitness, history)
-        best_solution — the best Solution1D found.
-        best_fitness  — its Min-Max objective value.
-        history       — best fitness per generation for plotting.
     """
     if config is None:
         config = GAConfig()
     if config.seed is not None:
         random.seed(config.seed)
 
-    start_time: float = time.time()
+    start = time.time()
+    R = problem.N + problem.M
+    pop_size = (
+        config.population_size if config.population_size > 0
+        else max(40, min(200, R + 20))
+    )
+    base_seed = config.seed if config.seed is not None else 0
 
-    # ── Initialise population ────────────────────────────────────────────
-    population: List[Solution1D] = [greedy_init(problem)]
-    for _ in range(config.population_size - 1):
-        population.append(random_init(problem))
+    # ── Initial population ───────────────────────────────────────────────
+    population: List[Routes] = _seed_population(problem, pop_size, base_seed)
+    fitnesses: List[float] = [_minmax(r, problem) for r in population]
 
-    fitnesses: List[float] = [evaluate(sol) for sol in population]
+    best_idx = min(range(len(fitnesses)), key=lambda i: fitnesses[i])
+    best_routes = _clone(population[best_idx])
+    best_fit = fitnesses[best_idx]
+    # Polish the incumbent once up front.
+    polished = _local_search(best_routes, problem, config.ls_passes)
+    if _minmax(polished, problem) < best_fit:
+        best_routes, best_fit = polished, _minmax(polished, problem)
+    history: List[float] = [best_fit]
 
-    best_idx: int = int(min(range(len(fitnesses)), key=lambda i: fitnesses[i]))
-    best_solution: Solution1D = population[best_idx].copy()
-    best_fitness: float = fitnesses[best_idx]
-    history: List[float] = [best_fitness]
-
-    # ── Adaptive mutation state ──────────────────────────────────────────
-    mutation_rate: float = config.mutation_rate_init
-    stagnation_counter: int = 0
-
-    mutators: List[Callable[[Solution1D], Solution1D]] = [
-        swap_mutation,
-        inversion_mutation,
-        relocate_mutation,
-    ]
+    mutation_rate = config.mutation_rate_init
+    stagnation = 0           # for adaptive mutation bumps
+    no_improve = 0           # for early-stop
 
     logger.info(
-        "GA started | pop=%d | max_gen=%d | init_mr=%.3f",
-        config.population_size, config.max_generations, mutation_rate,
+        "Memetic GA started | pop=%d | max_gen=%d | init_best=%.1f",
+        pop_size, config.max_generations, best_fit,
     )
 
-    # ── Evolution loop ───────────────────────────────────────────────────
     for gen in range(1, config.max_generations + 1):
-        elapsed: float = time.time() - start_time
-        if elapsed >= config.time_limit_seconds:
+        if time.time() - start >= config.time_limit_seconds:
             logger.info("GA time limit reached at generation %d", gen)
             break
 
-        new_population: List[Solution1D] = []
+        # Elitism.
+        order = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i])
+        new_pop: List[Routes] = [_clone(population[i]) for i in order[:config.elite_count]]
 
-        # Elitism: keep the top `elite_count` individuals
-        elite_indices: List[int] = sorted(
-            range(len(fitnesses)), key=lambda i: fitnesses[i]
-        )[:config.elite_count]
-        for ei in elite_indices:
-            new_population.append(population[ei].copy())
+        # Offspring.
+        while len(new_pop) < pop_size:
+            pa = _tournament(population, fitnesses, config.tournament_size)
+            pb = _tournament(population, fitnesses, config.tournament_size)
 
-        # Fill the rest via crossover + mutation
-        while len(new_population) < config.population_size:
-            # ── Selection ────────────────────────────────────────────
-            parent_a: Solution1D = tournament_selection(
-                population, fitnesses, config.tournament_size,
-            )
-            parent_b: Solution1D = tournament_selection(
-                population, fitnesses, config.tournament_size,
-            )
-
-            # ── Crossover ────────────────────────────────────────────
             if random.random() < config.crossover_rate:
-                child_a, child_b = order_crossover(parent_a, parent_b)
+                child = _route_crossover(pa, pb, problem)
             else:
-                child_a, child_b = parent_a.copy(), parent_b.copy()
+                child = pa
 
-            # ── Mutation ─────────────────────────────────────────────
             if random.random() < mutation_rate:
-                mutator = random.choice(mutators)
-                child_a = mutator(child_a)
-            if random.random() < mutation_rate:
-                mutator = random.choice(mutators)
-                child_b = mutator(child_b)
+                mutator = random.choices(_MUTATORS, weights=_MUT_WEIGHTS, k=1)[0]
+                child = mutator(child, problem)
 
-            new_population.append(child_a)
-            if len(new_population) < config.population_size:
-                new_population.append(child_b)
+            if random.random() < config.ls_rate:
+                child = _local_search(child, problem, config.ls_passes)
 
-        # ── Evaluate new population ──────────────────────────────────────
-        population = new_population
-        fitnesses = [evaluate(sol) for sol in population]
+            new_pop.append(child)
 
-        gen_best_idx: int = int(
-            min(range(len(fitnesses)), key=lambda i: fitnesses[i])
-        )
-        gen_best_fitness: float = fitnesses[gen_best_idx]
+        population = new_pop
+        fitnesses = [_minmax(r, problem) for r in population]
 
-        # ── Update global best ───────────────────────────────────────────
-        if gen_best_fitness < best_fitness:
-            best_fitness = gen_best_fitness
-            best_solution = population[gen_best_idx].copy()
-            stagnation_counter = 0
+        gen_idx = min(range(len(fitnesses)), key=lambda i: fitnesses[i])
+        gen_fit = fitnesses[gen_idx]
+
+        if gen_fit < best_fit - 1e-9:
+            # Polish the new champion before committing.
+            cand = _local_search(population[gen_idx], problem, config.ls_passes)
+            cand_fit = _minmax(cand, problem)
+            if cand_fit <= gen_fit:
+                best_routes, best_fit = _clone(cand), cand_fit
+            else:
+                best_routes, best_fit = _clone(population[gen_idx]), gen_fit
+            stagnation = 0
+            no_improve = 0
+            logger.debug("Gen %4d: new best = %.1f", gen, best_fit)
         else:
-            stagnation_counter += 1
+            stagnation += 1
+            no_improve += 1
 
-        history.append(best_fitness)
+        history.append(best_fit)
 
-        # ── Adaptive mutation rate adjustment ────────────────────────────
-        # If the population stagnates → INCREASE mutation to inject diversity.
-        # If improving → DECAY mutation to allow exploitation / fine-tuning.
-        if stagnation_counter >= config.stagnation_limit:
-            mutation_rate = min(
-                mutation_rate + config.mutation_rate_increase,
-                config.mutation_rate_max,
-            )
-            stagnation_counter = 0  # reset after bump
-            logger.debug(
-                "Gen %d: stagnation → mutation_rate ↑ %.3f", gen, mutation_rate,
-            )
+        # Adaptive mutation.
+        if stagnation >= config.stagnation_limit:
+            mutation_rate = min(mutation_rate + config.mutation_rate_increase,
+                                config.mutation_rate_max)
+            stagnation = 0
         else:
-            mutation_rate = max(
-                mutation_rate * config.mutation_rate_decay,
-                config.mutation_rate_min,
-            )
+            mutation_rate = max(mutation_rate * config.mutation_rate_decay,
+                                config.mutation_rate_min)
+
+        # Early stop on convergence.
+        if no_improve >= config.max_no_improve:
+            logger.info("GA converged: no improvement for %d generations (gen %d)",
+                        config.max_no_improve, gen)
+            break
 
         if gen % 50 == 0 or gen == 1:
-            logger.info(
-                "Gen %4d | best=%.4f | mr=%.3f | stag=%d",
-                gen, best_fitness, mutation_rate, stagnation_counter,
-            )
+            logger.info("Gen %4d | best=%.1f | mr=%.3f | no_improve=%d",
+                        gen, best_fit, mutation_rate, no_improve)
 
-    logger.info("GA finished | best_fitness=%.4f", best_fitness)
-    return best_solution, best_fitness, history
+    # Final polish + official evaluation.
+    final_routes = _local_search(best_routes, problem, config.ls_passes * 2)
+    if _minmax(final_routes, problem) < best_fit:
+        best_routes = final_routes
+
+    best_solution = _routes_to_solution(best_routes, problem)
+    final_fitness = evaluate(best_solution)
+    logger.info("Memetic GA finished | best fitness = %.1f", final_fitness)
+    return best_solution, final_fitness, history

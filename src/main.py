@@ -1,30 +1,19 @@
 """
-main.py — CLI Entry Point for the SARP Min-Max Optimizer
-=========================================================
+main.py — SARP Min-Max Optimizer: GA / Tabu Search / ALNS
 
-This script provides an ``argparse``-based command-line interface that:
-  1. Reads a SARP instance from one of the 3 data folds.
-  2. Generates an initial solution via greedy heuristic.
-  3. Runs the user-selected algorithm (GA, Tabu, ALNS, OR-Tools, or all).
-  4. Logs progress and saves results to the ``results/`` directory.
+Usage
+-----
+  # Chay 3 thuat toan tren 1 instance
+  python -m src.main --instance data/official/small/small_01.in
 
-Usage Examples
---------------
-  # Run GA on a single instance
-  python -m src.main --instance data/fold1/instance_01.txt --algorithm ga
+  # Gioi han thoi gian 60 giay moi thuat toan, seed co dinh
+  python -m src.main --instance data/official/small/small_01.in --time-limit 60 --seed 42
 
-  # Run all algorithms with custom seeds and time limit
-  python -m src.main --instance data/fold2/instance_05.txt --algorithm all \\
-      --seed 42 --time-limit 300
+  # Chay toan bo instance trong 1 thu muc
+  python -m src.main --fold data/official/small
 
-  # Run Tabu Search on every instance in fold 3
-  python -m src.main --fold data/fold3 --algorithm tabu --seed 0
-
-  # Verbose debug logging
-  python -m src.main --instance data/fold1/instance_01.txt --algorithm alns -v
-
-  # Run the optional Google OR-Tools routing solver
-  python -m src.main --instance data/official/small/small_01.in --algorithm ortools
+  # In them log chi tiet cua tung thuat toan
+  python -m src.main --instance data/official/small/small_01.in --verbose
 """
 
 from __future__ import annotations
@@ -35,314 +24,269 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-# ── Local imports ────────────────────────────────────────────────────────────
 from .encoding_and_read import ProblemData, Solution1D, read_instance, list_instances_in_fold
 from .fitness import evaluate, evaluate_detailed, decode_routes
-from .init import greedy_init
-from .ga import GAConfig, run_ga
-from .tabu import TabuConfig, run_tabu
-from .alns import ALNSConfig, run_alns
+from .ga           import GAConfig,      run_ga
+from .tabu         import TabuConfig,    run_tabu
+from .alns         import ALNSConfig,    run_alns
 from .ortools_solver import ORToolsConfig, run_ortools
 
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                           LOGGING SETUP                                  ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-
-def _setup_logging(verbose: bool, log_file: str | None = None) -> None:
-    """Configure root logger with console + optional file handlers."""
-    level: int = logging.DEBUG if verbose else logging.INFO
-    fmt: str = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-    datefmt: str = "%Y-%m-%d %H:%M:%S"
-
-    handlers: list = [logging.StreamHandler(sys.stdout)]
-    if log_file:
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
-
-    logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
-
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                        RESULT SERIALISATION                              ║
+# ║                          KET QUA MOT THUAT TOAN                          ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def _save_results(
-    result_dir: str,
-    instance_name: str,
-    algorithm: str,
-    best_solution: Solution1D,
-    best_fitness: float,
-    history: List[float],
-    elapsed_seconds: float,
-    config: Dict[str, Any],
-) -> str:
-    """
-    Save results to a JSON file in the results directory.
-
-    Returns the path to the saved file.
-    """
-    os.makedirs(result_dir, exist_ok=True)
-
-    timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename: str = f"{instance_name}_{algorithm}_{timestamp}.json"
-    filepath: str = os.path.join(result_dir, filename)
-
-    # Decode routes for human-readable output
-    routes: List[List[int]] = decode_routes(best_solution)
-    fitness_val, distances, penalties, totals = evaluate_detailed(best_solution)
-
-    result: Dict[str, Any] = {
-        "instance": instance_name,
-        "algorithm": algorithm,
-        "timestamp": timestamp,
-        "best_fitness": best_fitness,
-        "elapsed_seconds": round(elapsed_seconds, 2),
-        "chromosome": best_solution.chromosome,
-        "decoded_routes": routes,
-        "route_distances": [round(d, 4) for d in distances],
-        "route_penalties": [round(p, 4) for p in penalties],
-        "route_totals": [round(t, 4) for t in totals],
-        "history_length": len(history),
-        "history_first_10": history[:10],
-        "history_last_10": history[-10:],
-        "config": config,
-    }
-
-    with open(filepath, "w", encoding="utf-8") as fh:
-        json.dump(result, fh, indent=2, default=str)
-
-    return filepath
+@dataclass
+class AlgoResult:
+    name: str
+    solution: Solution1D
+    fitness: float
+    distances: List[float]
+    penalties: List[float]
+    elapsed: float
+    history: List[float]
+    feasible: bool          # True khi tong penalty = 0
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                       ALGORITHM DISPATCH                                 ║
+# ║                          CHAY TUNG THUAT TOAN                            ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-def _run_algorithm(
-    algorithm: str,
+def _run_one(
+    name: str,
     problem: ProblemData,
-    seed: int | None,
+    seed: Optional[int],
+    time_limit: float,
+    index: int,
+    total: int,
+) -> AlgoResult:
+    """Chay mot thuat toan, in trang thai, tra ve AlgoResult."""
+
+    sep = "=" * 62
+    print(f"\n{sep}")
+    print(f"  [{index}/{total}] {name}  —  {problem.name}")
+    print(f"  N={problem.N} khach | M={problem.M} hang | K={problem.K} xe")
+    print(sep)
+
+    t0 = time.time()
+
+    if name == "GA":
+        cfg = GAConfig(seed=seed, time_limit_seconds=time_limit)
+        sol, fit, hist = run_ga(problem, cfg)
+
+    elif name == "Tabu":
+        cfg = TabuConfig(seed=seed, time_limit_seconds=time_limit)
+        sol, fit, hist = run_tabu(problem, cfg)
+
+    elif name == "ALNS":
+        cfg = ALNSConfig(seed=seed, time_limit_seconds=time_limit)
+        sol, fit, hist = run_alns(problem, cfg)
+
+    else:  # OR-Tools
+        cfg = ORToolsConfig(time_limit_seconds=time_limit)
+        sol, fit, hist = run_ortools(problem, cfg)
+
+    elapsed = time.time() - t0
+
+    _, distances, penalties, _ = evaluate_detailed(sol)
+    feasible = (sum(penalties) == 0.0)
+
+    # ── In ket qua tung xe ───────────────────────────────────────────────
+    print(f"\n  Ket qua chi tiet:")
+    print(f"  {'Xe':>4}  {'Khoang cach':>14}  {'Penalty':>10}  {'Tong':>14}")
+    print(f"  {'-'*48}")
+    for k, (d, p) in enumerate(zip(distances, penalties)):
+        bottleneck = " <- bottleneck" if d == max(distances) else ""
+        print(f"  {k:>4}  {d:>14.2f}  {p:>10.2f}  {d+p:>14.2f}{bottleneck}")
+    print(f"  {'-'*48}")
+    print(f"  {'max(dist)':>4}  {max(distances):>14.2f}  {'sum(pen)':>10}  {fit:>14.2f}")
+
+    print(f"\n  Fitness   : {fit:.4f}")
+    print(f"  Kha thi   : {'CO (penalty=0)' if feasible else 'KHONG (co vi pham)'}")
+    print(f"  Thoi gian : {elapsed:.2f}s")
+    print(f"  Lich su   : {len(hist)} diem | bat dau={hist[0]:.1f} | cuoi={hist[-1]:.1f}")
+
+    return AlgoResult(
+        name=name,
+        solution=sol,
+        fitness=fit,
+        distances=distances,
+        penalties=penalties,
+        elapsed=elapsed,
+        history=hist,
+        feasible=feasible,
+    )
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                          BANG SO SANH                                    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _print_summary(problem: ProblemData, results: List[AlgoResult]) -> None:
+    """In bang so sanh cuoi cung giua 3 thuat toan."""
+    sep  = "=" * 62
+    dash = "-" * 62
+    best = min(results, key=lambda r: r.fitness)
+
+    print(f"\n{sep}")
+    print(f"  BANG TONG KET  —  {problem.name}")
+    print(f"  N={problem.N} | M={problem.M} | K={problem.K} | "
+          f"Q={problem.vehicle_capacities}")
+    print(dash)
+    print(f"  {'Thuat toan':<10}  {'Fitness':>12}  {'T(s)':>7}  "
+          f"{'Kha thi':>8}  {'Giam so voi init':>16}")
+    print(dash)
+
+    for r in results:
+        star = " *" if r is best else "  "
+        feasible_str = "CO" if r.feasible else "KHONG"
+        print(f"  {r.name:<10}{star} {r.fitness:>12.2f}  {r.elapsed:>7.2f}  "
+              f"{feasible_str:>8}")
+
+    print(dash)
+    print(f"  TOT NHAT: {best.name}  —  fitness = {best.fitness:.4f}")
+    print(f"{sep}\n")
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                          LUU JSON                                        ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def _save_json(result_dir: str, problem: ProblemData, r: AlgoResult) -> str:
+    os.makedirs(result_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(result_dir, f"{problem.name}_{r.name}_{ts}.json")
+
+    payload = {
+        "instance":       problem.name,
+        "algorithm":      r.name,
+        "timestamp":      ts,
+        "fitness":        r.fitness,
+        "feasible":       r.feasible,
+        "elapsed_s":      round(r.elapsed, 3),
+        "decoded_routes": decode_routes(r.solution),
+        "distances":      [round(d, 4) for d in r.distances],
+        "penalties":      [round(p, 4) for p in r.penalties],
+        "chromosome":     r.solution.chromosome,
+        "history":        {"length": len(r.history),
+                           "first10": r.history[:10],
+                           "last10":  r.history[-10:]},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, default=str)
+    return path
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                          XU LY MOT INSTANCE                              ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+def run_instance(
+    problem: ProblemData,
+    seed: Optional[int],
     time_limit: float,
     result_dir: str,
-) -> None:
-    """
-    Dispatch to the selected algorithm and save results.
+) -> List[AlgoResult]:
+    """Chay GA, Tabu, ALNS doc lap tren cung mot instance."""
 
-    Parameters
-    ----------
-    algorithm : str
-        One of 'ga', 'tabu', 'alns', 'ortools'.
-    problem : ProblemData
-        Parsed instance data.
-    seed : int | None
-        Random seed.
-    time_limit : float
-        Wall-clock time limit in seconds.
-    result_dir : str
-        Path to the results directory.
-    """
-    logger = logging.getLogger("main")
-    logger.info(
-        "Running %s on instance '%s' (N=%d, M=%d, K=%d)",
-        algorithm.upper(), problem.name, problem.N, problem.M, problem.K,
-    )
+    algorithms = ["GA", "Tabu", "ALNS", "OR-Tools"]
+    results: List[AlgoResult] = []
 
-    t0: float = time.time()
+    for idx, name in enumerate(algorithms, start=1):
+        try:
+            result = _run_one(
+                name=name,
+                problem=problem,
+                seed=seed,
+                time_limit=time_limit,
+                index=idx,
+                total=len(algorithms),
+            )
+        except Exception as exc:
+            print(f"\n  [{idx}/{len(algorithms)}] {name} — LOI: {exc}")
+            continue
 
-    if algorithm == "ga":
-        config = GAConfig(seed=seed, time_limit_seconds=time_limit)
-        best_sol, best_fit, hist = run_ga(problem, config)
-        cfg_dict = config.__dict__
+        results.append(result)
 
-    elif algorithm == "tabu":
-        config_ts = TabuConfig(seed=seed, time_limit_seconds=time_limit)
-        best_sol, best_fit, hist = run_tabu(problem, config_ts)
-        cfg_dict = config_ts.__dict__
+        # Luu JSON
+        path = _save_json(result_dir, problem, result)
+        print(f"  Luu: {path}")
 
-    elif algorithm == "alns":
-        config_al = ALNSConfig(seed=seed, time_limit_seconds=time_limit)
-        best_sol, best_fit, hist = run_alns(problem, config_al)
-        cfg_dict = config_al.__dict__
-
-    elif algorithm == "ortools":
-        config_or = ORToolsConfig(time_limit_seconds=time_limit)
-        best_sol, best_fit, hist = run_ortools(problem, config_or)
-        cfg_dict = config_or.__dict__
-
-    else:
-        raise ValueError(f"Unknown algorithm: {algorithm}")
-
-    elapsed: float = time.time() - t0
-
-    # Validate the final solution
-    is_valid, msg = best_sol.validate()
-    if not is_valid:
-        logger.warning("INVALID solution: %s", msg)
-    else:
-        logger.info("Solution validation: OK")
-
-    # Save results
-    filepath: str = _save_results(
-        result_dir=result_dir,
-        instance_name=problem.name,
-        algorithm=algorithm,
-        best_solution=best_sol,
-        best_fitness=best_fit,
-        history=hist,
-        elapsed_seconds=elapsed,
-        config=cfg_dict,
-    )
-
-    logger.info(
-        "%s finished | fitness=%.4f | time=%.2fs | saved → %s",
-        algorithm.upper(), best_fit, elapsed, filepath,
-    )
+    _print_summary(problem, results)
+    return results
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                       ARGUMENT PARSER                                    ║
+# ║                          CLI                                             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build and return the CLI argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="sarp_optimizer",
-        description=(
-            "Share-a-Ride Problem (SARP) Min-Max Optimizer — "
-            "GA / Tabu Search / ALNS / OR-Tools with Unified 1D Encoding"
-        ),
+    p = argparse.ArgumentParser(
+        prog="sarp",
+        description="SARP Min-Max Optimizer — GA / Tabu / ALNS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--instance", "-i", help="Duong dan file instance (.in / .txt)")
+    src.add_argument("--fold",     "-f", help="Thu muc chua nhieu instance")
 
-    # ── Input source (mutually exclusive) ────────────────────────────────
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument(
-        "--instance", "-i",
-        type=str,
-        help="Path to a single .txt or .in instance file.",
-    )
-    input_group.add_argument(
-        "--fold", "-f",
-        type=str,
-        help="Path to a data fold directory (runs all .txt/.in files inside).",
-    )
+    p.add_argument("--seed",        "-s", type=int,   default=None,
+                   help="Random seed (mac dinh: khong co)")
+    p.add_argument("--time-limit",  "-t", type=float, default=float("inf"),
+                   help="Gioi han thoi gian (giay) cho moi thuat toan")
+    p.add_argument("--results-dir", "-r", default="results",
+                   help="Thu muc luu file JSON (mac dinh: results/)")
+    p.add_argument("--verbose",     "-v", action="store_true",
+                   help="Hien thi log chi tiet cua tung thuat toan")
+    return p
 
-    # ── Algorithm selection ──────────────────────────────────────────────
-    parser.add_argument(
-        "--algorithm", "-a",
-        type=str,
-        choices=["ga", "tabu", "alns", "ortools", "all"],
-        default="all",
-        help="Algorithm to run (default: all; optional OR-Tools only when selected).",
-    )
-
-    # ── Execution parameters ─────────────────────────────────────────────
-    parser.add_argument(
-        "--seed", "-s",
-        type=int,
-        default=None,
-        help="Random seed for reproducibility.",
-    )
-    parser.add_argument(
-        "--time-limit", "-t",
-        type=float,
-        default=float("inf"),
-        help="Wall-clock time limit in seconds per algorithm run.",
-    )
-    parser.add_argument(
-        "--results-dir", "-r",
-        type=str,
-        default="results",
-        help="Directory to save result JSON files (default: results/).",
-    )
-
-    # ── Verbosity ────────────────────────────────────────────────────────
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable debug-level logging.",
-    )
-
-    return parser
-
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║                              MAIN                                        ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def main() -> None:
-    """CLI entry point."""
-    parser: argparse.ArgumentParser = build_parser()
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
-    # ── Set up logging ───────────────────────────────────────────────────
-    log_file: str = os.path.join(
-        args.results_dir,
-        f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+    # Logging: chi hien thi WARNING tro len theo mac dinh (giau log noi bo)
+    level = logging.DEBUG if args.verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(name)-20s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
     )
-    _setup_logging(verbose=args.verbose, log_file=log_file)
-    logger = logging.getLogger("main")
 
-    logger.info("=" * 70)
-    logger.info("SARP Min-Max Optimizer — Session started")
-    logger.info("=" * 70)
-
-    # ── Resolve instance files ───────────────────────────────────────────
-    instance_files: List[str] = []
+    # Thu thap danh sach file
     if args.instance:
-        instance_files = [args.instance]
-    elif args.fold:
-        instance_files = list_instances_in_fold(args.fold)
-        if not instance_files:
-            logger.error("No .txt files found in fold: %s", args.fold)
+        files = [args.instance]
+    else:
+        files = list_instances_in_fold(args.fold)
+        if not files:
+            print(f"Khong tim thay file .in/.txt trong: {args.fold}", file=sys.stderr)
             sys.exit(1)
-        logger.info("Found %d instances in fold %s", len(instance_files), args.fold)
 
-    # ── Determine algorithms to run ──────────────────────────────────────
-    algorithms: List[str] = (
-        ["ga", "tabu", "alns"] if args.algorithm == "all"
-        else [args.algorithm]
-    )
+    print(f"\nSARP Min-Max Optimizer")
+    print(f"Instances  : {len(files)}")
+    print(f"Time limit : {args.time_limit}s / thuat toan")
+    print(f"Seed       : {args.seed}")
+    print(f"Results    : {args.results_dir}/")
 
-    # ── Main execution loop ──────────────────────────────────────────────
-    for filepath in instance_files:
-        logger.info("─" * 50)
-        logger.info("Loading instance: %s", filepath)
-
+    for fp in files:
         try:
-            problem: ProblemData = read_instance(filepath)
+            problem = read_instance(fp)
         except (FileNotFoundError, ValueError) as e:
-            logger.error("Failed to load instance: %s", e)
+            print(f"\n[LOI] Khong doc duoc {fp}: {e}", file=sys.stderr)
             continue
 
-        logger.info(
-            "Parsed: N=%d passengers, M=%d parcels, K=%d vehicles, Q=%s",
-            problem.N, problem.M, problem.K, problem.vehicle_capacities,
+        run_instance(
+            problem=problem,
+            seed=args.seed,
+            time_limit=args.time_limit,
+            result_dir=args.results_dir,
         )
-        logger.info("Chromosome length = %d", problem.chromosome_length)
-
-        # ── Generate initial solution (shared starting point) ────────────
-        init_sol: Solution1D = greedy_init(problem, seed=args.seed)
-        init_fit: float = evaluate(init_sol)
-        logger.info("Greedy initial fitness = %.4f", init_fit)
-
-        for algo in algorithms:
-            _run_algorithm(
-                algorithm=algo,
-                problem=problem,
-                seed=args.seed,
-                time_limit=args.time_limit,
-                result_dir=args.results_dir,
-            )
-
-    logger.info("=" * 70)
-    logger.info("All runs complete. Results saved in: %s", args.results_dir)
-    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

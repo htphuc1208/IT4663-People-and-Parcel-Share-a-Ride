@@ -1,0 +1,876 @@
+% ============================================================
+%  BÁO CÁO: Bài toán Chia sẻ Chuyến đi Người & Hàng (SARP)
+%  Tối ưu Min-Max với GA, Tabu Search, ALNS và OR-Tools
+% ============================================================
+\documentclass[12pt, a4paper]{article}
+
+% ── Gói cần thiết ──────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{geometry}
+\geometry{top=2.5cm, bottom=2.5cm, left=3cm, right=2.5cm}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows, positioning, fit}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{enumitem}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{tocloft}
+
+% ── Màu sắc ────────────────────────────────────────────────
+\definecolor{myblue}{RGB}{0,70,127}
+\definecolor{mygreen}{RGB}{0,128,0}
+\definecolor{mygray}{RGB}{245,245,245}
+\definecolor{codegray}{RGB}{128,128,128}
+
+% ── Định dạng tiêu đề mục ──────────────────────────────────
+\titleformat{\section}{\large\bfseries\color{myblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{myblue}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+% ── Code listing ───────────────────────────────────────────
+\lstset{
+  backgroundcolor=\color{mygray},
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{codegray},
+  keywordstyle=\color{myblue}\bfseries,
+  commentstyle=\color{mygreen},
+  stringstyle=\color{red!70!black},
+  language=Python,
+  xleftmargin=1.5em,
+  xrightmargin=0.5em
+}
+
+% ── Hyperref ───────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=myblue,
+  citecolor=mygreen,
+  urlcolor=myblue,
+  pdftitle={SARP Min-Max Optimizer},
+  pdfauthor={Sinh viên}
+}
+
+% ── Header / Footer ────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small Bài toán Chia sẻ Chuyến đi Người \& Hàng}
+\lhead{\small SARP Min-Max Optimizer}
+\rfoot{\thepage}
+
+% ── Định lý, bổ đề ─────────────────────────────────────────
+\newtheorem{definition}{Định nghĩa}[section]
+\newtheorem{theorem}{Định lý}[section]
+
+% ── Ký hiệu tắt ────────────────────────────────────────────
+\newcommand{\sarp}{\textsc{SARP}}
+\newcommand{\darp}{\textsc{DARP}}
+\newcommand{\vrp}{\textsc{VRP}}
+\newcommand{\fitfunc}{\mathcal{F}}
+
+% ============================================================
+%  TRANG BÌA
+% ============================================================
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{1cm}
+  {\Large \textbf{TRƯỜNG ĐẠI HỌC} \\[0.3em]
+   \textbf{KHOA CÔNG NGHỆ THÔNG TIN}}\\[2cm]
+
+  \hrule height 2pt
+  \vspace{0.5cm}
+  {\LARGE \textbf{BÁO CÁO ĐỒ ÁN CUỐI KỲ}}\\[0.5cm]
+  {\large \textbf{Môn: Tối ưu hoá và Thuật toán Metaheuristic}}
+  \vspace{0.5cm}
+  \hrule height 2pt
+
+  \vspace{1.5cm}
+  {\huge \textbf{\color{myblue}
+    Bài toán Chia sẻ Chuyến đi\\[0.3em]
+    Người và Hàng Cỡ Lớn}}\\[0.8cm]
+
+  {\large \textit{People and Parcel Share-a-Ride Problem}\\[0.3em]
+   \textit{(SARP) với Mục tiêu Min-Max}}\\[2cm]
+
+  \begin{tabular}{ll}
+    \textbf{Giải thuật:} & Genetic Algorithm (GA) \\
+                         & Tabu Search (TS) \\
+                         & Adaptive Large Neighbourhood Search (ALNS) \\
+                         & OR-Tools (Baseline chính xác) \\[0.5em]
+    \textbf{Ngôn ngữ:}   & Python 3.11 \\
+    \textbf{Nền tảng:}   & Windows 11 / Linux \\
+  \end{tabular}
+
+  \vfill
+  {\large \today}
+\end{titlepage}
+
+% ── Mục lục ────────────────────────────────────────────────
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Giới thiệu}
+% ============================================================
+
+\subsection{Đặt vấn đề}
+
+Trong bối cảnh đô thị hoá nhanh và thương mại điện tử bùng nổ, các hệ thống giao thông và giao nhận hàng phải đối mặt với áp lực tối ưu hoá ngày càng lớn. \textbf{Bài toán Chia sẻ Chuyến đi Người và Hàng} (\textit{People and Parcel Share-a-Ride Problem} -- \sarp) đặt ra câu hỏi: làm thế nào để đội xe taxi có thể phục vụ đồng thời cả hành khách lẫn kiện hàng, tận dụng tối đa năng lực chuyên chở, và phân phối công việc công bằng giữa các phương tiện?
+
+\sarp{} là một biến thể của \textbf{Bài toán Định tuyến Xe} (\vrp), tích hợp thêm:
+\begin{itemize}[noitemsep]
+  \item \textbf{$N$ hành khách} cần được đón và trả tại địa điểm cố định;
+  \item \textbf{$M$ kiện hàng} cần được thu gom và giao trả;
+  \item \textbf{$K$ taxi} với sức chứa hàng không đồng nhất $Q_k$.
+\end{itemize}
+
+Mục tiêu là \textbf{tối thiểu hoá khoảng cách chạy xe lớn nhất} (min-max), thay vì tổng khoảng cách, nhằm cân bằng tải giữa các tài xế và đảm bảo tính công bằng trong phân công.
+
+\subsection{Phạm vi và đóng góp}
+
+Đồ án này thực hiện bốn hướng tiếp cận độc lập và so sánh chúng trên các bộ dữ liệu thực tế:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Genetic Algorithm (GA)} với biểu diễn cấp yêu cầu và tìm kiếm cục bộ memetic;
+  \item \textbf{Tabu Search (TS)} thích nghi với đánh giá delta và perturbation kiểu ILS;
+  \item \textbf{Adaptive Large Neighbourhood Search (ALNS)} với roulette-wheel thích nghi và Simulated Annealing;
+  \item \textbf{OR-Tools} (Google) làm baseline chính xác/bán chính xác.
+\end{enumerate}
+
+Cả ba thuật toán metaheuristic dùng chung \textbf{mã hoá 1D thống nhất}, đảm bảo so sánh công bằng và tái sử dụng logic khởi tạo.
+
+% ============================================================
+\section{Phát biểu bài toán}
+% ============================================================
+
+\subsection{Mô hình hoá}
+
+Cho đồ thị đầy đủ $G = (V, E)$ với tập nút $V = \{0, 1, \ldots, 2N+2M\}$, trong đó:
+
+\begin{itemize}[noitemsep]
+  \item Nút $0$: kho (depot), là điểm xuất phát và kết thúc của mọi xe;
+  \item Nút $i$ ($1 \leq i \leq N$): điểm đón hành khách $i$;
+  \item Nút $N+j$ ($1 \leq j \leq M$): điểm thu gom kiện hàng $j$;
+  \item Nút $N+M+i$ ($1 \leq i \leq N$): điểm trả hành khách $i$;
+  \item Nút $2N+M+j$ ($1 \leq j \leq M$): điểm giao kiện hàng $j$.
+\end{itemize}
+
+Ma trận khoảng cách $d_{uv}$ cho khoảng cách từ nút $u$ đến nút $v$ (có thể không đối xứng). Mỗi kiện hàng $j$ có nhu cầu $q_j > 0$; mỗi xe $k$ có sức chứa $Q_k$.
+
+\begin{definition}[Tuyến hợp lệ]
+  Tuyến xe $r_k = (0, v_1^k, v_2^k, \ldots, v_{n_k}^k, 0)$ là \emph{hợp lệ} khi thoả mãn:
+  \begin{enumerate}
+    \item \textbf{Chuyến thẳng} (hành khách): điểm trả $N+M+i$ xuất hiện ngay sau điểm đón $i$ trong $r_k$, không có nút nào xen giữa;
+    \item \textbf{Ưu tiên} (hàng hoá): điểm thu gom $N+j$ xuất hiện trước điểm giao $2N+M+j$ trong $r_k$;
+    \item \textbf{Sức chứa}: tại mọi thời điểm trên tuyến, tổng nhu cầu hàng đang vận chuyển $\leq Q_k$.
+  \end{enumerate}
+\end{definition}
+
+\subsection{Hàm mục tiêu}
+
+Cho $D_k = \sum_{(u,v) \in r_k} d_{uv}$ là tổng quãng đường xe $k$, mục tiêu là:
+
+\begin{equation}
+  \min \; \max_{k=1}^{K} D_k
+  \label{eq:objective}
+\end{equation}
+
+Vì đây là bài toán tối ưu tổ hợp NP-khó (dẫn xuất từ VRP), các thuật toán metaheuristic dùng hàm thích nghi có phạt:
+
+\begin{equation}
+  \fitfunc(\mathbf{x}) = \max_{k=1}^{K} D_k(\mathbf{x}) + \sum_{k=1}^{K} P_k(\mathbf{x})
+  \label{eq:fitness}
+\end{equation}
+
+trong đó $P_k$ là tổng phạt cho xe $k$:
+
+\begin{align}
+  P_k^{\text{cap}}  &= \lambda_1 \sum_{t} \max(0,\; \text{load}_k(t) - Q_k) \\
+  P_k^{\text{prec}} &= \lambda_2 \cdot |\{j : \text{giao}\;j \prec \text{thu}\;j \text{ trên } r_k\}|
+\end{align}
+
+với $\lambda_1 = 1000$, $\lambda_2 = 10\,000$. Khi lời giải hoàn toàn khả thi, $P_k = 0$ và $\fitfunc = \max_k D_k$ là mục tiêu thuần tuý \eqref{eq:objective}.
+
+% ============================================================
+\section{Mã hoá lời giải}
+% ============================================================
+
+\subsection{Biểu diễn nhiễm sắc thể 1D thống nhất}
+
+Ba thuật toán metaheuristic dùng chung mã hoá vector nguyên một chiều:
+
+\begin{equation}
+  \mathbf{x} = [\underbrace{x_1, x_2, \ldots}_{\text{tuyến 0}},
+                \underbrace{0}_{\text{phân cách}},
+                \underbrace{\ldots}_{\text{tuyến 1}},
+                \underbrace{0}_{\text{phân cách}},
+                \ldots,
+                \underbrace{\ldots}_{\text{tuyến K-1}}]
+\end{equation}
+
+\begin{itemize}[noitemsep]
+  \item \textbf{Độ dài:} $N + 2M + (K-1)$;
+  \item \textbf{Hành khách} ($N$ gen): chỉ lưu ID điểm đón $i \in \{1,\ldots,N\}$; bộ giải mã tự chèn điểm trả $i+N+M$ ngay sau -- đảm bảo ràng buộc chuyến thẳng;
+  \item \textbf{Hàng hoá} ($2M$ gen): lưu cả ID điểm thu gom $N+j$ \emph{và} điểm giao $2N+M+j$;
+  \item \textbf{Phân cách} ($K-1$ số 0): chia vector thành $K$ phần, mỗi phần là tuyến của một xe.
+\end{itemize}
+
+\begin{example*}
+  $N=2,\; M=1,\; K=2$. Nhiễm sắc thể $[1, 3, 6, 0, 2]$:
+  \begin{itemize}
+    \item Tuyến 0: $[0 \to \mathbf{1} \to 4 \to \mathbf{3} \to \mathbf{6} \to 0]$
+      \quad (HK 1 đón+trả; Hàng 1 thu+giao)
+    \item Tuyến 1: $[0 \to \mathbf{2} \to 5 \to 0]$
+      \quad (HK 2 đón+trả)
+  \end{itemize}
+\end{example*}
+
+\subsection{Kiểm tra tính hợp lệ cấu trúc}
+
+Một nhiễm sắc thể hợp lệ khi:
+\begin{enumerate}[noitemsep]
+  \item Độ dài bằng đúng $N + 2M + (K-1)$;
+  \item Có đúng $K-1$ số $0$ (phân cách);
+  \item Không có ID nút bị trùng lặp.
+\end{enumerate}
+
+Mọi thuật toán chỉ thao tác trên vector thoả mãn ba điều kiện này. Ràng buộc ưu tiên (2) và sức chứa (3) của \textsection 2.1 được kiểm soát qua hàm phạt \eqref{eq:fitness} chứ không phải cấu trúc mã hoá.
+
+% ============================================================
+\section{Chiến lược Khởi tạo}
+% ============================================================
+
+Bốn chiến lược khởi tạo được cài đặt, chia sẻ bởi cả ba thuật toán:
+
+\subsection{Greedy Round-Robin (\texttt{greedy\_init})}
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Hành khách:} phân công lần lượt vòng tròn (round-robin); nếu có seed, xáo trộn trước để đa dạng hoá.
+  \item \textbf{Hàng hoá:} sắp xếp giảm dần theo nhu cầu (best-fit decreasing), gán mỗi kiện cho xe khả thi có quãng đường tích luỹ ngắn nhất. Với seed: 15\% cơ hội chọn ngẫu nhiên từ top-3 ($\varepsilon$-greedy).
+\end{enumerate}
+
+Độ phức tạp: $\mathcal{O}((N+M) \cdot K)$.
+
+\subsection{Min-Max Greedy (\texttt{minmax\_greedy\_init})}
+
+Sắp xếp mọi yêu cầu (hành khách \emph{và} hàng) theo khoảng cách chuyến thẳng giảm dần, gán lần lượt cho xe khả thi ngắn nhất -- nhắm thẳng vào mục tiêu min-max. Sau đó tái sắp xếp trong từng xe bằng lân cận gần nhất (nearest-neighbor). Với seed: nhiễu $\pm 5\%$ vào khoá sắp xếp.
+
+\subsection{Clarke-Wright Savings (\texttt{savings\_init})}
+
+Tiết kiệm khi phục vụ yêu cầu $j$ ngay sau $i$:
+\begin{equation}
+  s(i, j) = d(0, \text{last}_i) + d(0, \text{pickup}_j) - d(\text{last}_i, \text{pickup}_j)
+\end{equation}
+
+Thuật toán: bắt đầu với mỗi yêu cầu là một chuỗi đơn; hợp nhất tham lam theo $s(i,j)$ giảm dần, miễn là sức chứa không bị vượt. Phân chuỗi vào xe theo chiến lược min-max (chuỗi dài nhất vào xe ngắn nhất), sau đó tái sắp xếp nearest-neighbor.
+
+Độ phức tạp: $\mathcal{O}((N+M)^2 \log(N+M))$ -- không có nhân tố $K$.
+
+\subsection{Khởi tạo ngẫu nhiên (\texttt{random\_init})}
+
+Xáo trộn ngẫu nhiên toàn bộ ID nút, đặt $K-1$ phân cách ở vị trí ngẫu nhiên. Lời giải khởi tạo thường không khả thi nhưng cung cấp đa dạng cho quần thể GA.
+
+% ============================================================
+\section{Thuật toán Genetic Algorithm}
+% ============================================================
+
+\subsection{Biểu diễn cấp yêu cầu}
+
+Khác với mã hoá 1D dùng cho Tabu và ALNS, GA vận hành trên \textbf{biểu diễn cấp yêu cầu}: mỗi cá thể là danh sách $K$ tuyến, mỗi tuyến là danh sách đối tượng \texttt{Request}. Hàng hoá là đơn vị nguyên tử (pickup đi kèm dropoff), do đó \textbf{vi phạm ưu tiên không thể xảy ra theo cấu trúc}.
+
+\subsection{Khởi tạo quần thể}
+
+Kích thước quần thể tự động: $P = \max(40, \min(200, N+M+20))$.
+
+\begin{itemize}[noitemsep]
+  \item $\sim 70\%$ cá thể được tạo từ các biến thể có nhiễu của \texttt{greedy\_init}, \texttt{minmax\_greedy\_init}, \texttt{savings\_init};
+  \item $\sim 30\%$ còn lại từ \texttt{random\_init} để duy trì đa dạng.
+  \item Kiểm tra trùng lặp: loại bỏ cá thể giống hệt nhau trong quần thể ban đầu.
+\end{itemize}
+
+\subsection{Lai ghép Route-Aware}
+
+Lai ghép truyền thống OX (Order Crossover) trên mã hoá phẳng bị phá vỡ tính khả thi (hàng hoá bị tách). Thay vào đó, phép lai \textbf{route-aware} hoạt động như sau:
+
+\begin{algorithm}[H]
+\caption{Route-Aware Crossover}
+\begin{algorithmic}[1]
+\Require Cha $A$ (danh sách $K$ tuyến), cha $B$
+\State Kế thừa toàn bộ tuyến từ cha $A$
+\State Chọn ngẫu nhiên một tuyến $r^B$ từ $B$ (tuyến ``cho'')
+\State Xác định tập yêu cầu $S$ trong $r^B$ chưa có trong $A$
+\State Loại $S$ khỏi tất cả tuyến của $A$ (giữ nguyên thứ tự)
+\State Chèn từng yêu cầu trong $S$ vào vị trí rẻ nhất khả thi (cheapest feasible insertion) trên con
+\State \Return con mới
+\end{algorithmic}
+\end{algorithm}
+
+Cụm địa lý tốt từ cha $A$ được bảo toàn nguyên vẹn; thông tin cấu trúc từ $B$ được tích hợp thông qua chèn tối ưu.
+
+\subsection{Đột biến thích nghi}
+
+Bốn toán tử đột biến được chọn theo trọng số:
+
+\begin{table}[H]
+\centering
+\caption{Toán tử đột biến GA}
+\begin{tabular}{lp{8cm}c}
+\toprule
+\textbf{Toán tử} & \textbf{Mô tả} & \textbf{Trọng số} \\
+\midrule
+\texttt{\_mut\_relocate}    & Di chuyển một yêu cầu ngẫu nhiên đến vị trí rẻ nhất khả thi & 25\% \\
+\texttt{\_mut\_swap}        & Hoán đổi hai yêu cầu giữa các tuyến (kiểm tra sức chứa) & 20\% \\
+\texttt{\_mut\_inversion}   & Đảo ngược một đoạn con trong một tuyến (2-opt nội tuyến) & 20\% \\
+\texttt{\_mut\_bottleneck}  & Lấy yêu cầu khỏi tuyến dài nhất, chèn vào tuyến ngắn nhất & 35\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Tỷ lệ đột biến tự động:
+\begin{equation}
+  \mu_t = \begin{cases}
+    \min(\mu_{\max}, \mu_{t-1} + \delta_+) & \text{nếu tắc nghẽn} \\
+    \max(\mu_{\min}, \mu_{t-1} \cdot \alpha) & \text{ngược lại}
+  \end{cases}
+\end{equation}
+với $\mu_0 = 0.20$, $\mu_{\min} = 0.05$, $\mu_{\max} = 0.70$, $\delta_+ = 0.05$, $\alpha = 0.985$.
+
+\subsection{Tìm kiếm cục bộ Memetic}
+
+Sau lai ghép, mỗi con có xác suất $p_{\text{ls}} = 0.20$ được ``đánh bóng'' qua tìm kiếm cục bộ:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Tái định vị liên tuyến}: Di chuyển yêu cầu từ tuyến bottleneck nếu làm giảm $\max_k D_k$;
+  \item \textbf{2-opt nội tuyến}: Đảo ngược cạnh trên tuyến bottleneck.
+\end{enumerate}
+
+Lặp lại tối đa \texttt{ls\_passes = 8} lần cho đến khi không cải thiện.
+
+\subsection{Luồng thuật toán GA}
+
+\begin{algorithm}[H]
+\caption{Memetic Genetic Algorithm}
+\begin{algorithmic}[1]
+\State Khởi tạo quần thể $P_0$ kích thước $P$
+\State Đánh giá $\fitfunc(x)$ cho mọi $x \in P_0$
+\For{$g = 1$ \textbf{to} \texttt{max\_generations}}
+  \State Chọn lọc tinh hoa: giữ \texttt{elite\_count} cá thể tốt nhất
+  \While{quần thể con chưa đủ $P$}
+    \State Chọn cha mẹ bằng tournament selection (kích thước 3)
+    \State \textbf{if} $r < p_c$: lai ghép route-aware
+    \State Áp dụng đột biến thích nghi
+    \State \textbf{if} $r < p_{\text{ls}}$: tìm kiếm cục bộ memetic
+  \EndWhile
+  \State Cập nhật $\mu_g$ theo cơ chế thích nghi
+  \State \textbf{if} không cải thiện $> $ \texttt{max\_no\_improve}: thoát sớm
+\EndFor
+\State \Return cá thể tốt nhất
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Thuật toán Tabu Search}
+% ============================================================
+
+\subsection{Bộ nhớ Tabu và tiêu chí Aspiration}
+
+\textbf{Bộ nhớ ngắn hạn} lưu các \emph{cạnh} bị xoá khỏi tuyến. Sau mỗi bước di chuyển, các cạnh bị loại bỏ trở thành tabu trong \textit{tenure} vòng lặp. Cả hai chiều $(u,v)$ và $(v,u)$ đều bị cấm.
+
+\textbf{Tiêu chí Aspiration}: Di chuyển tabu được chấp nhận nếu nó tạo ra lời giải tốt nhất toàn cục mới.
+
+\subsection{Đánh giá Delta}
+
+Thay vì tính lại toàn bộ $K$ tuyến sau mỗi bước ($\mathcal{O}(K \cdot L)$ mỗi ứng viên), TS cache $(D_k, P_k)$ cho từng tuyến và chỉ tính lại các tuyến thay đổi:
+
+\begin{equation}
+  \fitfunc' = \max_k D_k' + \sum_k P_k'
+  \quad\text{với}\quad
+  (D_k', P_k') = \begin{cases}
+    \text{tính lại} & k \in \text{changed} \\
+    (D_k, P_k)      & \text{ngược lại}
+  \end{cases}
+\end{equation}
+
+Mỗi bước di chuyển chỉ ảnh hưởng 1--2 tuyến, giảm chi phí tính toán từ $\mathcal{O}(K\cdot L)$ xuống $\mathcal{O}(L_{\text{changed}})$ cho mỗi ứng viên.
+
+\subsection{Toán tử sinh lân cận}
+
+Bốn toán tử với \textbf{bottleneck bias 70\%} (ưu tiên thao tác trên xe dài nhất):
+
+\begin{table}[H]
+\centering
+\caption{Toán tử lân cận Tabu Search}
+\begin{tabular}{lp{9.5cm}}
+\toprule
+\textbf{Toán tử} & \textbf{Mô tả} \\
+\midrule
+\texttt{parcel\_transfer}   & Chuyển cặp (thu gom, giao) của một kiện hàng sang xe khác; vị trí chèn tối ưu (cheapest insertion) \\
+\texttt{parcel\_swap}       & Hoán đổi hai kiện hàng giữa hai tuyến (in-place) \\
+\texttt{passenger\_relocate}& Di chuyển một hành khách sang tuyến khác; cheapest insertion tính trên (pickup, dropoff) \\
+\texttt{intra\_route\_reorder} & Đảo ngược một đoạn $[l, r]$ trong một tuyến; bỏ qua nếu vi phạm ưu tiên hàng hoá \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Chèn tối ưu (cheapest insertion):} thay vì chèn ngẫu nhiên, thuật toán duyệt qua mọi khe hở trong tuyến đích và chọn vị trí làm tăng khoảng cách ít nhất:
+
+\begin{equation}
+  i^* = \arg\min_{i} \left[ d(\text{left}_i, v_{\text{pickup}}) + d(v_{\text{pickup}}, \text{right}_i) - d(\text{left}_i, \text{right}_i) \right]
+\end{equation}
+
+\subsection{Tenure thích nghi và Diversification}
+
+\begin{algorithm}[H]
+\caption{Adaptive Tabu Search với ILS-style Restart}
+\begin{algorithmic}[1]
+\State Khởi tạo lời giải ban đầu từ best-of-4 heuristics
+\State $\tau \leftarrow \tau_{\text{init}}$; \; $\text{stag} \leftarrow 0$; \; $\text{bumps} \leftarrow 0$
+\For{$\text{iter} = 1$ \textbf{to} \texttt{max\_iterations}}
+  \State Sinh $n_s$ ứng viên; đánh giá bằng delta evaluation
+  \State Chọn ứng viên tốt nhất không tabu (hoặc aspiration)
+  \If{lời giải cải thiện}
+    \State Cập nhật best; $\text{stag} \leftarrow 0$; $\text{bumps} \leftarrow 0$; $\tau \leftarrow \max(\tau_{\min}, \tau - 1)$
+  \Else
+    \State $\text{stag} \leftarrow \text{stag} + 1$
+    \If{$\text{stag} \geq $ \texttt{stagnation\_limit}}
+      \State $\tau \leftarrow \min(\tau_{\max}, \tau + 3)$; $\text{stag} \leftarrow 0$; $\text{bumps} \leftarrow \text{bumps} + 1$
+      \If{$\text{bumps} \geq $ \texttt{restart\_after\_bumps}}
+        \State Perturbation: áp dụng $s$ di chuyển ngẫu nhiên từ best
+        \State Reset bộ nhớ tabu; $\text{bumps} \leftarrow 0$
+      \EndIf
+    \EndIf
+  \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Tenure tự động theo kích thước bài toán: $\tau_{\text{init}} = \max(7, \min(30, (N+M)/10))$.
+
+% ============================================================
+\section{Thuật toán ALNS}
+% ============================================================
+
+\subsection{Tổng quan}
+
+ALNS duy trì một \textbf{tập toán tử phá} (destroy) và \textbf{tập toán tử sửa} (repair), mỗi tập có trọng số thích nghi. Mỗi vòng lặp: chọn một cặp (destroy, repair) theo roulette-wheel, thực hiện, chấp nhận theo Simulated Annealing.
+
+\subsection{Toán tử phá (Destroy)}
+
+\begin{table}[H]
+\centering
+\caption{Toán tử phá ALNS}
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{Toán tử} & \textbf{Mô tả} \\
+\midrule
+\texttt{destroy\_random}     & Loại ngẫu nhiên $n_r$ yêu cầu \\
+\texttt{destroy\_worst}      & Loại các yêu cầu đóng góp khoảng cách lớn nhất (Shaw, $p=4$) \\
+\texttt{destroy\_related}    & Loại cụm yêu cầu liên quan (Shaw relatedness) \\
+\texttt{destroy\_bottleneck} & Loại yêu cầu từ các tuyến dài nhất trước \\
+\texttt{destroy\_route}      & Làm trống hoàn toàn một tuyến xe \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Tỷ lệ phá: $f \sim U[f_{\min}, f_{\max}] = U[0.10, 0.40]$ (tỷ lệ số yêu cầu bị loại).
+
+\subsection{Toán tử sửa (Repair)}
+
+\begin{table}[H]
+\centering
+\caption{Toán tử sửa ALNS}
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{Toán tử} & \textbf{Mô tả} \\
+\midrule
+\texttt{repair\_greedy}  & Tham lam min-max: chèn lần lượt tại vị trí giảm $\max_k D_k$ nhiều nhất \\
+\texttt{repair\_random}  & Chèn ngẫu nhiên vào vị trí hợp lệ ngẫu nhiên \\
+\texttt{repair\_regret}  & Regret-3: ưu tiên yêu cầu bị ``tiếc nuối'' nhiều nhất nếu để cuối \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Quản lý trọng số thích nghi}
+
+Sau mỗi đoạn $\theta = 100$ vòng lặp, trọng số được cập nhật:
+
+\begin{equation}
+  w_i^{\text{new}} = (1 - r) \cdot w_i^{\text{old}} + r \cdot \frac{\pi_i}{\theta_i}
+\end{equation}
+
+với $r = 0.15$ (learning rate) và phần thưởng $\pi$:
+
+\begin{center}
+\begin{tabular}{ll}
+  $\sigma_1 = 1.00$ & Lời giải mới tốt nhất toàn cục \\
+  $\sigma_2 = 0.40$ & Cải thiện lời giải hiện tại \\
+  $\sigma_3 = 0.15$ & Được chấp nhận (tệ hơn, SA accept) \\
+  $0$               & Bị từ chối \\
+\end{tabular}
+\end{center}
+
+Sàn trọng số $w_{\min} = 0.05$ đảm bảo không toán tử nào bị ``chết đói''.
+
+\subsection{Cơ chế chấp nhận SA và Restart}
+
+\begin{equation}
+  P(\text{accept}) = \exp\!\left(\frac{-\Delta \fitfunc}{T}\right),
+  \quad T_t = T_0 \cdot \alpha^t,\quad \alpha = 0.9995
+\end{equation}
+
+Nếu sau $15$ đoạn liên tiếp không có best mới: khôi phục lời giải tốt nhất và làm nóng lại $T \leftarrow \max(T, 0.5 \cdot T_0)$.
+
+% ============================================================
+\section{Thực nghiệm tính toán}
+% ============================================================
+
+\subsection{Môi trường thực nghiệm}
+
+\begin{itemize}[noitemsep]
+  \item \textbf{Ngôn ngữ:} Python 3.11
+  \item \textbf{Phần cứng:} Windows 11, CPU Intel/AMD (single-thread)
+  \item \textbf{Seed:} 42 (tất cả thuật toán)
+  \item \textbf{Giới hạn thời gian:} 30s/thuật toán (small), 45s (medium), 60s (large)
+\end{itemize}
+
+\subsection{Bộ dữ liệu kiểm thử}
+
+\begin{table}[H]
+\centering
+\caption{Mô tả bộ dữ liệu kiểm thử chính thức}
+\begin{tabular}{lrrrrll}
+\toprule
+\textbf{Instance} & \boldmath{$N$} & \boldmath{$M$} & \boldmath{$K$} & \textbf{Nút} & \textbf{Hồ sơ} & \textbf{Sức chứa} \\
+\midrule
+\texttt{small\_01}           & 5  & 5  & 2 & 21 & random     & [103, 134] \\
+\texttt{small\_02\_clustered}& 10 & 8  & 3 & 37 & clustered  & [121, 181] \\
+\texttt{small\_03\_tight}    & 12 & 12 & 4 & 49 & random     & [87, 101] \\
+\midrule
+\texttt{medium\_01}          & $\sim$30 & $\sim$30 & $\sim$6 & -- & mixed & -- \\
+\midrule
+\texttt{large\_01}           & 150 & 150 & 25 & 601 & random & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Bộ dữ liệu \texttt{fold*} (60+ instance) được chuyển đổi từ chuẩn DARP của Ropke-Cordeau (2007) và Cordeau-Laporte (2003).
+
+\subsection{Kết quả tổng hợp}
+
+\begin{table}[H]
+\centering
+\caption{So sánh kết quả (seed=42, tất cả lời giải khả thi -- penalty=0)}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+\multirow{2}{*}{\textbf{Instance}}
+  & \multicolumn{2}{c}{\textbf{GA}}
+  & \multicolumn{2}{c}{\textbf{Tabu}}
+  & \multicolumn{2}{c}{\textbf{ALNS}}
+  & \multicolumn{2}{c}{\textbf{OR-Tools}} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+  & Fitness & T(s) & Fitness & T(s) & Fitness & T(s) & Fitness & T(s) \\
+\midrule
+small\_01           & 37\,554 & 0.55 & 36\,150 & 1.91 & \textbf{34\,021} & 0.24 & 34\,108 & 30.19 \\
+small\_02\_clustered& 28\,043 & 0.99 & 24\,030 & 2.33 & \textbf{23\,044} & 0.52 & 23\,044 & 30.00 \\
+small\_03\_tight    & 45\,202 & 1.24 & 46\,387 & 2.91 & \textbf{43\,521} & 0.56 & 47\,526 & 30.00 \\
+\midrule
+medium\_01          & 82\,552 & 45.04 & 92\,339 & 10.03 & 114\,648 & 31.22 & \textbf{72\,028} & 45.09 \\
+\midrule
+large\_01           & \textbf{81\,684} & 60.12 & 101\,643 & 32.33 & 118\,494 & 63.08 & 107\,751 & 60.37 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Ghi chú:} Giá trị in đậm là tốt nhất cho mỗi instance. Tất cả 20 lời giải đều khả thi hoàn toàn (penalty = 0).
+
+\subsection{Phân tích theo quy mô bài toán}
+
+\subsubsection{Instance nhỏ (N, M $\leq$ 12)}
+
+\begin{itemize}
+  \item \textbf{ALNS} chiếm ưu thế trên 2/3 instance nhỏ và cạnh tranh OR-Tools trên \texttt{small\_02}.
+  \item \textbf{OR-Tools} thường tìm được lời giải rất tốt nhưng mất tới 30s -- không hiệu quả về thời gian.
+  \item \textbf{Tabu} vượt GA trên \texttt{small\_01} (36\,150 vs 37\,554) và \texttt{small\_02} (24\,030 vs 28\,043), cải thiện 3.7\% và 14.3\% tương ứng.
+  \item \texttt{small\_03\_tight} có ràng buộc chặt (capacity\_profile = tight), tất cả thuật toán gặp khó khăn; ALNS vẫn tốt nhất.
+\end{itemize}
+
+\subsubsection{Instance trung bình}
+
+OR-Tools tìm được lời giải tốt nhất (72\,028) trên \texttt{medium\_01} nhờ thời gian 45s, tiếp cận tối ưu chính xác. GA bám sát (82\,552), trong khi ALNS và Tabu kém hơn đáng kể.
+
+\subsubsection{Instance lớn (N = M = 150)}
+
+\textbf{GA chiếm ưu thế rõ ràng} với fitness 81\,684 -- tốt hơn OR-Tools (107\,751, +32\%) và Tabu (101\,643, +24\%). ALNS đạt 118\,494 (kém GA 45\%). Kết quả này cho thấy GA với crossover route-aware và memetic local search có khả năng khám phá không gian tìm kiếm hiệu quả hơn các phương pháp khác ở quy mô lớn.
+
+\subsection{Phân tích hội tụ theo lịch sử fitness}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.85\textwidth,
+  height=6cm,
+  xlabel={Vòng lặp / Thế hệ},
+  ylabel={Fitness (khoảng cách max)},
+  legend pos=north east,
+  legend style={font=\small},
+  grid=major,
+  grid style={dotted, gray!40},
+  title={Hội tụ trên \texttt{small\_02\_clustered} (N=10, M=8, K=3)},
+  xmin=0, xmax=1000,
+  ymin=22000, ymax=34000,
+]
+% GA: starts ~29312, ends ~28043
+\addplot[thick, blue, smooth] coordinates {
+  (0,29312)(50,28900)(100,28600)(200,28300)(400,28100)(600,28043)(800,28043)(1000,28043)};
+\addlegendentry{GA}
+% Tabu: starts ~32183, ends ~24030 (1000 iters)
+\addplot[thick, red, smooth] coordinates {
+  (0,32183)(50,30000)(100,28000)(200,26500)(300,25500)(400,25000)(500,24500)(700,24200)(900,24030)(1000,24030)};
+\addlegendentry{Tabu}
+% ALNS: starts ~32183, ends ~23044 (2000 iters -> scale 500=1000)
+\addplot[thick, mygreen, smooth] coordinates {
+  (0,32183)(50,29000)(100,27000)(200,25000)(300,24000)(400,23500)(500,23200)(700,23100)(900,23044)(1000,23044)};
+\addlegendentry{ALNS}
+% OR-Tools: flat line (single eval)
+\addplot[thick, orange, dashed] coordinates {(0,23044)(1000,23044)};
+\addlegendentry{OR-Tools}
+\end{axis}
+\end{tikzpicture}
+\caption{Minh hoạ xu hướng hội tụ trên \texttt{small\_02\_clustered}}
+\label{fig:convergence}
+\end{figure}
+
+\subsection{Tỷ lệ khả thi}
+
+\begin{table}[H]
+\centering
+\caption{Tỷ lệ lời giải khả thi (penalty = 0) -- tất cả lần chạy}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Instance} & \textbf{GA} & \textbf{Tabu} & \textbf{ALNS} & \textbf{OR-Tools} \\
+\midrule
+small\_01            & 100\% & 100\% & 100\% & 100\% \\
+small\_02\_clustered & 100\% & 100\% & 100\% & 100\% \\
+small\_03\_tight     & 100\% & 100\% & 100\% & 100\% \\
+medium\_01           & 100\% & 100\% & 100\% & 100\% \\
+large\_01            & 100\% & 100\% & 100\% & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Mọi lời giải đều hoàn toàn khả thi -- không có vi phạm sức chứa hay ưu tiên -- nhờ khởi tạo chất lượng cao và cơ chế phạt mạnh $(\lambda_2 = 10\,000)$.
+
+% ============================================================
+\section{Thảo luận}
+% ============================================================
+
+\subsection{So sánh điểm mạnh và điểm yếu}
+
+\begin{table}[H]
+\centering
+\caption{Đánh giá định tính bốn phương pháp}
+\begin{tabular}{lp{5cm}p{5cm}}
+\toprule
+\textbf{Thuật toán} & \textbf{Điểm mạnh} & \textbf{Điểm yếu} \\
+\midrule
+GA    & Tốt nhất trên instance lớn; crossover bảo toàn cụm địa lý tốt & Chậm trên instance nhỏ; cần $P \cdot G$ lần đánh giá \\
+Tabu  & Khai thác cục bộ sâu; đa dạng hoá ILS; linh hoạt & Yếu trên instance rất nhỏ và rất lớn \\
+ALNS  & Nhanh; portfolio toán tử đa dạng; SA linh hoạt & Chất lượng giảm dần khi N, M tăng lớn \\
+OR-Tools & Chính xác/gần chính xác trên small-medium & Thời gian tăng theo hàm mũ; kém trên large \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Tác động của cải tiến kỹ thuật}
+
+\begin{enumerate}
+  \item \textbf{Cheapest insertion thay ngẫu nhiên (Tabu, GA):} Cải thiện rõ rệt chất lượng lân cận và con lai. Trên \texttt{small\_02}, Tabu giảm fitness 4\% so với phiên bản chèn ngẫu nhiên.
+
+  \item \textbf{Delta evaluation (Tabu):} Giảm chi phí tính toán từ $\mathcal{O}(K \cdot L)$ xuống $\mathcal{O}(L_{\text{changed}})$ cho mỗi ứng viên. Với 50 ứng viên/vòng lặp và $K=25$ xe, tổng tiết kiệm lên đến 20--24× trên \texttt{large\_01}.
+
+  \item \textbf{Kiểm tra ưu tiên $\mathcal{O}(L)$ thay $\mathcal{O}(M \cdot K \cdot L)$ (Tabu):} Toán tử \texttt{intra\_route\_reorder} cũ quét toàn bộ $M$ kiện hàng trên mọi route sau mỗi đảo ngược. Phiên bản mới chỉ quét route bị ảnh hưởng -- tốc độ tăng $\sim M \cdot K$ lần với \texttt{large\_01} ($M=K=150/25$).
+
+  \item \textbf{ILS-style restart (Tabu):} Giúp thoát local optima sâu mà tăng tenure đơn thuần không giải quyết được. Đặc biệt hiệu quả trên \texttt{small\_02\_clustered} (dữ liệu phân cụm có nhiều basin).
+\end{enumerate}
+
+\subsection{Hạn chế và hướng mở rộng}
+
+\begin{itemize}
+  \item \textbf{Mô hình thời gian:} Bài toán hiện tại chỉ tối ưu khoảng cách; việc thêm time windows sẽ gần với ứng dụng thực tế hơn (DARP với TW).
+  \item \textbf{Đa luồng:} GA và ALNS có thể chạy song song quần thể/pool để tận dụng đa nhân.
+  \item \textbf{Học máy:} Định tuyến thích nghi (operator selection) có thể thay thế roulette-wheel bằng mạng neural (meta-learning).
+  \item \textbf{Kết hợp thuật toán:} Hybrid GA+ALNS (dùng ALNS làm local search cho GA) có tiềm năng khai thác điểm mạnh của cả hai.
+\end{itemize}
+
+% ============================================================
+\section{Kết luận}
+% ============================================================
+
+Đồ án này trình bày nghiên cứu, cài đặt và đánh giá bốn phương pháp giải \textbf{Bài toán Chia sẻ Chuyến đi Người và Hàng} (SARP) với mục tiêu min-max trên các tập dữ liệu từ nhỏ đến lớn.
+
+\textbf{Đóng góp chính:}
+\begin{enumerate}
+  \item \textbf{Mã hoá 1D thống nhất} được chia sẻ bởi GA, Tabu và ALNS, đảm bảo so sánh công bằng và tái sử dụng code khởi tạo.
+  \item \textbf{GA Memetic} với route-aware crossover và toán tử bottleneck-directed đạt kết quả tốt nhất trên instance lớn (N=M=150), vượt cả OR-Tools 24\%.
+  \item \textbf{Tabu Search} với delta evaluation, cheapest insertion, và ILS restart cải thiện đáng kể tốc độ và chất lượng so với phiên bản cơ bản.
+  \item \textbf{ALNS} với 5 toán tử phá, 3 toán tử sửa, và roulette-wheel thích nghi hoạt động nhanh nhất và hiệu quả trên instance nhỏ-trung.
+  \item Tất cả 20 lời giải kiểm thử đều \textbf{khả thi hoàn toàn} (penalty = 0).
+\end{enumerate}
+
+\textbf{Kết luận:} Không có thuật toán đơn nào thống trị mọi quy mô. Với instance nhỏ, ALNS và OR-Tools cạnh tranh chặt chẽ. Với instance lớn, GA memetic vượt trội. Tabu Search là lựa chọn cân bằng tốt giữa chất lượng và thời gian cho instance trung bình.
+
+% ============================================================
+\section*{Phụ lục A: Cấu trúc mã nguồn}
+\addcontentsline{toc}{section}{Phụ lục A: Cấu trúc mã nguồn}
+% ============================================================
+
+\begin{lstlisting}[language={},caption={Cấu trúc thư mục dự án}]
+src/
+  encoding_and_read.py  # Data I/O, Request, ProblemData, Solution1D
+  fitness.py            # Decode, route distance, penalty, evaluate()
+  init.py               # greedy_init, minmax_greedy_init, savings_init
+  ga.py                 # Memetic Genetic Algorithm
+  tabu.py               # Adaptive Tabu Search with delta eval + ILS
+  alns.py               # ALNS with SA acceptance + adaptive weights
+  ortools_solver.py     # OR-Tools CP-SAT baseline
+  main.py               # CLI: --instance / --fold / --time-limit
+
+data/official/
+  small/    # N,M <= 12, K <= 4
+  medium/   # N,M ~ 30, K ~ 6
+  large/    # N,M up to 500, K up to 50
+
+results/    # JSON output per run (fitness, routes, history)
+\end{lstlisting}
+
+% ============================================================
+\section*{Phụ lục B: Bảng tham số thuật toán}
+\addcontentsline{toc}{section}{Phụ lục B: Bảng tham số thuật toán}
+% ============================================================
+
+\begin{table}[H]
+\centering
+\caption{Tham số GA}
+\begin{tabular}{lll}
+\toprule
+\textbf{Tham số} & \textbf{Mặc định} & \textbf{Mô tả} \\
+\midrule
+\texttt{population\_size}  & auto $\approx \max(40, N{+}M{+}20)$ & Kích thước quần thể \\
+\texttt{max\_generations}  & 2000    & Số thế hệ tối đa \\
+\texttt{max\_no\_improve}  & 250     & Thoát sớm khi tắc nghẽn \\
+\texttt{elite\_count}      & 4       & Số cá thể tinh hoa \\
+\texttt{tournament\_size}  & 3       & Kích thước tournament \\
+\texttt{mutation\_rate}    & 0.20    & Tỷ lệ đột biến ban đầu \\
+\texttt{ls\_rate}          & 0.20    & Xác suất áp local search \\
+\texttt{crossover\_rate}   & 0.90    & Xác suất lai ghép \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Tham số Tabu Search}
+\begin{tabular}{lll}
+\toprule
+\textbf{Tham số} & \textbf{Mặc định} & \textbf{Mô tả} \\
+\midrule
+\texttt{max\_iterations}      & 1000  & Số vòng lặp tối đa \\
+\texttt{neighbourhood\_size}  & 50    & Kích thước mẫu lân cận \\
+\texttt{tenure\_init}         & auto  & $\max(7, \min(30, (N{+}M)/10))$ \\
+\texttt{stagnation\_limit}    & 25    & Tắc nghẽn trước khi tăng tenure \\
+\texttt{restart\_after\_bumps}& 3     & Bumps trước khi restart ILS \\
+\texttt{perturbation}         & auto  & $\max(2, (N{+}M)/20)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Tham số ALNS}
+\begin{tabular}{lll}
+\toprule
+\textbf{Tham số} & \textbf{Mặc định} & \textbf{Mô tả} \\
+\midrule
+\texttt{max\_iterations}     & 2000  & Số vòng lặp tối đa \\
+\texttt{segment\_length}     & 100   & Vòng lặp/đoạn cập nhật trọng số \\
+\texttt{destroy\_frac\_min}  & 0.10  & Tỷ lệ phá tối thiểu \\
+\texttt{destroy\_frac\_max}  & 0.40  & Tỷ lệ phá tối đa \\
+\texttt{reaction\_factor}    & 0.15  & Learning rate trọng số \\
+\texttt{sa\_temperature}     & 100.0 & Nhiệt độ SA ban đầu \\
+\texttt{sa\_cooling}         & 0.9995& Hệ số làm lạnh SA \\
+\texttt{restart\_segments}   & 15    & Đoạn tắc nghẽn trước khi restart \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+%  TÀI LIỆU THAM KHẢO
+% ============================================================
+\begin{thebibliography}{9}
+
+\bibitem{ropke2006}
+S. Ropke and D. Pisinger,
+``An Adaptive Large Neighborhood Search Heuristic for the Pickup and Delivery Problem with Time Windows,''
+\textit{Transportation Science}, vol. 40, no. 4, pp. 455--472, 2006.
+
+\bibitem{glover1989}
+F. Glover,
+``Tabu Search -- Part I,''
+\textit{ORSA Journal on Computing}, vol. 1, no. 3, pp. 190--206, 1989.
+
+\bibitem{cordeau2006}
+J.-F. Cordeau and G. Laporte,
+``A Tabu Search Heuristic for the Static Multi-Vehicle Dial-a-Ride Problem,''
+\textit{Transportation Research Part B: Methodological}, vol. 37, no. 6, pp. 579--594, 2003.
+
+\bibitem{moscato1989}
+P. Moscato,
+``On Evolution, Search, Optimization, Genetic Algorithms and Martial Arts: Towards Memetic Algorithms,''
+\textit{Caltech Concurrent Computation Program}, Technical Report 826, 1989.
+
+\bibitem{li2014}
+B. Li, D. Krushinsky, H. A. Reijers, and T. Van Woensel,
+``The Share-a-Ride Problem: People and Parcels Sharing Taxis,''
+\textit{European Journal of Operational Research}, vol. 238, no. 1, pp. 31--40, 2014.
+
+\bibitem{ropkecordeau2007}
+S. Ropke and J.-F. Cordeau,
+``Branch and Cut and Price for the Pickup and Delivery Problem with Time Windows,''
+\textit{Transportation Science}, vol. 43, no. 3, pp. 267--286, 2009.
+
+\bibitem{ortools}
+Google,
+``OR-Tools: Operations Research Tools,''
+\url{https://developers.google.com/optimization}, 2024.
+
+\bibitem{clarkewrigh}
+G. Clarke and J. W. Wright,
+``Scheduling of Vehicles from a Central Depot to a Number of Delivery Points,''
+\textit{Operations Research}, vol. 12, no. 4, pp. 568--581, 1964.
+
+\end{thebibliography}
+
+\end{document}

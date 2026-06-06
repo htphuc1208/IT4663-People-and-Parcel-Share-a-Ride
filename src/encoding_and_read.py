@@ -50,8 +50,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from functools import cached_property
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -166,6 +167,30 @@ class ProblemData:
     def dist(self, node_a: int, node_b: int) -> float:
         """Look up the travel distance between two node IDs."""
         return self.distance_matrix[node_a][node_b]
+
+    # ── Cached lookup tables (built once, reused by fitness/ALNS) ─────────
+    # These replace per-evaluate dict construction.  `cached_property`
+    # memoises the result on first access; safe because instance data is
+    # never mutated after parsing.
+
+    @cached_property
+    def demand_by_pickup(self) -> Dict[int, int]:
+        """parcel pickup node → parcel demand q[i]."""
+        return {r.pickup_node: r.demand for r in self.parcels}
+
+    @cached_property
+    def pickup_by_dropoff(self) -> Dict[int, int]:
+        """parcel dropoff node → its pickup node."""
+        return {r.dropoff_node: r.pickup_node for r in self.parcels}
+
+    @cached_property
+    def request_by_node(self) -> Dict[int, Request]:
+        """Any pickup OR dropoff node → its owning Request (passenger/parcel)."""
+        mapping: Dict[int, Request] = {}
+        for req in self.all_requests():
+            mapping[req.pickup_node] = req
+            mapping[req.dropoff_node] = req
+        return mapping
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -384,11 +409,12 @@ def read_instance(filepath: str) -> ProblemData:
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 def list_instances_in_fold(fold_dir: str) -> List[str]:
-    """Return sorted list of .txt instance file paths inside a fold directory."""
+    """Return sorted list of .in and .txt instance file paths inside a fold directory."""
     fold_path: Path = Path(fold_dir).resolve()
     if not fold_path.is_dir():
         raise FileNotFoundError(f"Fold directory not found: {fold_path}")
-    return sorted(str(p) for p in fold_path.glob("*.txt"))
+    files = list(fold_path.glob("*.in")) + list(fold_path.glob("*.txt"))
+    return sorted(str(p) for p in files)
 
 
 def load_fold(fold_dir: str) -> List[ProblemData]:
